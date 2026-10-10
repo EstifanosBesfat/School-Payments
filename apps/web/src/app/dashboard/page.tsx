@@ -9,6 +9,11 @@ import { formatDateTime } from '@/lib/utils';
 
 export const metadata: Metadata = { title: 'Overview' };
 
+/** Ledger balances from the API are debits minus credits. Fee revenue is credit-normal, so earned fees are the negation. */
+function creditNormal(balance: number): number {
+  return -balance;
+}
+
 interface SchoolRow {
   id: string;
   name: string;
@@ -87,7 +92,7 @@ export default async function DashboardHomePage() {
       <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Stat label="Families owe" value={formatEtb(balances.STUDENT_RECEIVABLE ?? 0)} hint="Open invoice balances" />
-        <Stat label="Fee revenue" value={formatEtb(balances.FEE_REVENUE ?? 0)} />
+        <Stat label="Fee revenue" value={formatEtb(creditNormal(balances.FEE_REVENUE ?? 0))} hint="Earned on issued invoices" />
         <Stat label="At the gateway" value={formatEtb(balances.GATEWAY_CLEARING ?? 0)} hint="Settles to the school bank account" />
       </div>
       <Card>
