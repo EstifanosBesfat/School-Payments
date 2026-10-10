@@ -15,6 +15,7 @@ COPY packages/shared packages/shared
 COPY apps/web apps/web
 COPY tsconfig.base.json tsconfig.base.json
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_STANDALONE=1
 RUN pnpm --filter @payment/shared build && pnpm --filter @payment/web build
 
 FROM node:22-alpine AS runner

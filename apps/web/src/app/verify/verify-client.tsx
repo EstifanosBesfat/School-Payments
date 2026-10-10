@@ -118,7 +118,13 @@ export function VerifyClient({ initialNumber, initialCode }: { initialNumber: st
 
   return (
     <div className="space-y-5">
-      <form action={(formData) => void lookup(formData)} className="space-y-4">
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void lookup(new FormData(event.currentTarget));
+        }}
+      >
         <Field label="Receipt number" htmlFor="receiptNo">
           <Input id="receiptNo" name="receiptNo" required defaultValue={initialNumber} autoComplete="off" className="font-mono" />
         </Field>

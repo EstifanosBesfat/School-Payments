@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .next/
+apps/web/AGENTS.md
 *.tsbuildinfo
 .turbo/
 coverage/
