@@ -1,0 +1,9 @@
+# Same image as the API, different command. Build the API image first, then:
+#   docker build -f apps/api/Dockerfile -t payment-api .
+#   docker run --env-file .env payment-api node dist/worker.js
+#
+# This file exists so compose files can name the worker explicitly.
+FROM payment-api
+ENV RUN_WORKERS=true
+USER node
+CMD ["node", "dist/worker.js"]
