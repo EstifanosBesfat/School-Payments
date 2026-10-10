@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { maskPhone } from '@payment/shared';
 import { randomUUID } from 'node:crypto';
 import type { SmsProvider, SmsSendRequest, SmsSendResult } from './sms-provider.interface';
 
@@ -9,7 +10,7 @@ export class ConsoleSmsProvider implements SmsProvider {
 
   async send(request: SmsSendRequest): Promise<SmsSendResult> {
     const id = randomUUID();
-    this.logger.log(`[${id}] to ${request.to}${request.sender ? ` from ${request.sender}` : ''}:\n${request.message}`);
+    this.logger.log(`[${id}] to ${maskPhone(request.to)}${request.sender ? ` from ${request.sender}` : ''}:\n${request.message}`);
     return { providerMessageId: id };
   }
 }
