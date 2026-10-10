@@ -80,17 +80,26 @@ export function VerifyClient({ initialNumber, initialCode }: { initialNumber: st
   const [lookingUp, setLookingUp] = useState(false);
 
   useEffect(() => {
-    if (!window.location.hash || window.location.hash.length < 8) return;
-    try {
-      const decoded = decodeReceiptQr(window.location.href);
-      void verifyReceiptSignature(keysFromEnv(), decoded).then((result) => {
-        if (result.valid) setView({ kind: 'valid', payload: decoded.payload, code: result.verificationCode, source: 'qr' });
-        else setView({ kind: 'invalid', reason: reasonText(result.reason) });
-      });
-    } catch {
-      setView({ kind: 'invalid', reason: reasonText('malformed') });
+    if (window.location.hash.length >= 8) {
+      try {
+        const decoded = decodeReceiptQr(window.location.href);
+        void verifyReceiptSignature(keysFromEnv(), decoded).then((result) => {
+          if (result.valid) setView({ kind: 'valid', payload: decoded.payload, code: result.verificationCode, source: 'qr' });
+          else setView({ kind: 'invalid', reason: reasonText(result.reason) });
+        });
+      } catch {
+        setView({ kind: 'invalid', reason: reasonText('malformed') });
+      }
+      return;
     }
-  }, []);
+    const receiptNo = initialNumber.trim();
+    const code = initialCode.trim();
+    if (!receiptNo || !code) return;
+    const formData = new FormData();
+    formData.set('receiptNo', receiptNo);
+    formData.set('code', code);
+    void lookup(formData);
+  }, [initialCode, initialNumber]);
 
   async function lookup(formData: FormData) {
     setLookingUp(true);
