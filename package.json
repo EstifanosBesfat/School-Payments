@@ -1,0 +1,30 @@
+{
+  "name": "payment-platform",
+  "private": true,
+  "description": "Multi-school payment platform for Ethiopia built on licensed gateways (Chapa first).",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "format": "prettier --write .",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:generate": "pnpm --filter @payment/db generate",
+    "db:migrate": "pnpm --filter @payment/db migrate:dev",
+    "db:deploy": "pnpm --filter @payment/db migrate:deploy",
+    "db:seed": "pnpm --filter @payment/db seed",
+    "keys:generate": "pnpm --filter @payment/api keys:generate"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "prettier": "^3.9.9",
+    "turbo": "^2.11.7",
+    "typescript": "~5.9.3"
+  }
+}

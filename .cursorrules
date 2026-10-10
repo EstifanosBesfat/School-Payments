@@ -1,0 +1,42 @@
+# Ethiopian School Payment Platform - Project Rules
+
+## Monorepo layout (pnpm + Turborepo)
+- apps/web: Next.js App Router, React 19, Tailwind CSS v4 (CSS-first config via `@import "tailwindcss"` and `@theme`; no tailwind.config.js). Talks to apps/api over HTTP only. Never imports @payment/db.
+- apps/api: NestJS 11 (CommonJS). The only app that touches the database, gateways, SMS, email and storage.
+- packages/db: Prisma 7 schema, migrations, generated client (`prisma-client` generator + `@prisma/adapter-pg`), seed.
+- packages/shared: framework-free TypeScript used by both apps (Zod schemas, money helpers, receipt canonicalization, phone helpers). Must run in Node and the browser: no `node:` imports.
+- Install dependencies with `pnpm --filter <package> add <dep>`. Confirm which app you are in before installing.
+
+## Money
+- Amounts are integer santim (1 ETB = 100 santim), stored as `Int`. Never use floats for money.
+- Convert to gateway strings ("150.00") only at the gateway boundary with `santimToEtbString` / `etbStringToSantim` from @payment/shared.
+
+## Payments (non-negotiable)
+- Only a server-side gateway verify call may mark a payment as PAID. Browser redirects and callbacks only trigger verification.
+- Webhooks: verify HMAC with a timing-safe comparison, store the raw event in `WebhookEvent` (deduplicated), process asynchronously, idempotently.
+- The verified amount and currency must equal the invoice amount exactly, otherwise flag for review.
+- Every payment attempt gets a unique `txRef`. Mutating API endpoints accept an `Idempotency-Key` header.
+- Settle payments inside one database transaction: Payment status, Invoice status, LedgerEntry rows, AuditLog row.
+- Never delete financial rows. Ledger entries, audit logs and receipts are append-only (enforced by database triggers). Corrections are reversal entries.
+
+## Gateways and providers
+- All payment gateways implement `PaymentGateway` (apps/api/src/gateways/payment-gateway.interface.ts). Add SantimPay/ArifPay as new adapters; never call a gateway directly from business code.
+- All SMS providers implement `SmsProvider`. All storage drivers implement `StorageDriver`.
+
+## Multi-tenancy
+- Every tenant-owned table has `schoolId`. Every tenant-scoped service method takes `schoolId` from the authenticated principal, never from the request body.
+- Tenant request paths run inside `PrismaService.tenant(schoolId, fn)` so PostgreSQL Row-Level Security applies as a second layer.
+
+## Security
+- Passwords: Argon2id. Admin and accountant roles must enable TOTP 2FA.
+- Access tokens are short-lived JWTs; refresh tokens are opaque, stored hashed, rotated on every use, with reuse detection.
+- API keys are shown once, stored as SHA-256 hashes, scoped to one school.
+- Validate every input with Zod schemas from @payment/shared. Never log secrets, full phone numbers, or card data.
+
+## Receipts
+- Receipts are signed with Ed25519 over the canonical JSON from `canonicalReceiptPayload` in @payment/shared and chained via `prevHash` per school.
+- Changing the receipt payload shape requires bumping `RECEIPT_PAYLOAD_VERSION`.
+
+## Code style
+- TypeScript strict mode everywhere. No `any` unless unavoidable at a third-party boundary.
+- Write complete, working code. No placeholder comments.

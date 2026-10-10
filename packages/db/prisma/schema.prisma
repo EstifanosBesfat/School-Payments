@@ -1,0 +1,512 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "cjs"
+  importFileExtension = ""
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  PLATFORM_ADMIN
+  SCHOOL_ADMIN
+  ACCOUNTANT
+  PARENT
+}
+
+enum SchoolStatus {
+  ONBOARDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum Language {
+  am
+  en
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REVIEW
+  REFUNDED
+  REVERSED
+}
+
+enum LedgerAccount {
+  STUDENT_RECEIVABLE
+  FEE_REVENUE
+  GATEWAY_CLEARING
+  GATEWAY_FEES
+  PLATFORM_COMMISSION
+  REFUNDS
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum WebhookEventStatus {
+  RECEIVED
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum MessageStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+enum DeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum IssueStatus {
+  OPEN
+  RESOLVED
+}
+
+model School {
+  id                  String       @id @default(cuid())
+  name                String
+  code                String       @unique
+  status              SchoolStatus @default(ONBOARDING)
+  contactEmail        String
+  contactPhone        String
+  city                String?
+  tin                 String?
+  logoUrl             String?
+  smsSenderName       String?
+  receiptSeq          Int          @default(0)
+  invoiceSeq          Int          @default(0)
+  lastReceiptHash     String?
+  chapaSubaccountId   String?
+  settlementEncrypted String?
+  settlementSummary   String?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  users            User[]
+  students         Student[]
+  guardians        Guardian[]
+  feeItems         FeeItem[]
+  invoices         Invoice[]
+  payments         Payment[]
+  receipts         Receipt[]
+  apiKeys          ApiKey[]
+  webhookEndpoints WebhookEndpoint[]
+}
+
+model User {
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  name                String
+  passwordHash        String
+  role                UserRole
+  schoolId            String?
+  school              School?   @relation(fields: [schoolId], references: [id])
+  totpSecretEncrypted String?
+  totpEnabled         Boolean   @default(false)
+  totpLastUsedStep    Int?
+  failedLoginCount    Int       @default(0)
+  lockedUntil         DateTime?
+  isActive            Boolean   @default(true)
+  lastLoginAt         DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  refreshTokens RefreshToken[]
+
+  @@index([schoolId])
+}
+
+model RefreshToken {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  familyId     String
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedById String?
+  userAgent    String?
+  ip           String?
+  createdAt    DateTime  @default(now())
+
+  @@index([familyId])
+  @@index([userId])
+}
+
+model ParentOtp {
+  id         String    @id @default(cuid())
+  phone      String
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([phone, createdAt])
+}
+
+model Student {
+  id        String   @id @default(cuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id])
+  code      String
+  firstName String
+  lastName  String
+  grade     String
+  section   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guardians StudentGuardian[]
+  invoices  Invoice[]
+
+  @@unique([schoolId, code])
+  @@index([schoolId, grade, section])
+}
+
+model Guardian {
+  id        String   @id @default(cuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id])
+  name      String
+  phone     String
+  email     String?
+  language  Language @default(am)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  students StudentGuardian[]
+
+  @@unique([schoolId, phone])
+  @@index([phone])
+}
+
+model StudentGuardian {
+  schoolId     String
+  studentId    String
+  guardianId   String
+  student      Student  @relation(fields: [studentId], references: [id])
+  guardian     Guardian @relation(fields: [guardianId], references: [id])
+  relationship String?
+  isPrimary    Boolean  @default(false)
+
+  @@id([studentId, guardianId])
+  @@index([schoolId])
+}
+
+model FeeItem {
+  id          String   @id @default(cuid())
+  schoolId    String
+  school      School   @relation(fields: [schoolId], references: [id])
+  name        String
+  description String?
+  amount      Int
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([schoolId, name])
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  schoolId       String
+  school         School        @relation(fields: [schoolId], references: [id])
+  studentId      String
+  student        Student       @relation(fields: [studentId], references: [id])
+  number         String
+  term           String?
+  status         InvoiceStatus @default(ISSUED)
+  currency       String        @default("ETB")
+  totalAmount    Int
+  paidAmount     Int           @default(0)
+  dueDate        DateTime      @db.Date
+  payToken       String        @unique
+  issuedAt       DateTime?
+  paidAt         DateTime?
+  cancelledAt    DateTime?
+  lastReminderAt DateTime?
+  createdById    String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  lines    InvoiceLine[]
+  payments Payment[]
+  receipts Receipt[]
+
+  @@unique([schoolId, number])
+  @@index([schoolId, status])
+  @@index([status, dueDate])
+}
+
+model InvoiceLine {
+  id          String  @id @default(cuid())
+  schoolId    String
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id])
+  feeItemId   String?
+  description String
+  amount      Int
+  position    Int
+
+  @@index([invoiceId])
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  schoolId          String
+  school            School        @relation(fields: [schoolId], references: [id])
+  invoiceId         String
+  invoice           Invoice       @relation(fields: [invoiceId], references: [id])
+  txRef             String        @unique
+  gateway           String
+  status            PaymentStatus @default(PENDING)
+  amount            Int
+  currency          String        @default("ETB")
+  payerName         String
+  payerPhone        String
+  payerEmail        String?
+  checkoutUrl       String?
+  gatewayReference  String?       @unique
+  method            String?
+  gatewayFee        Int?
+  platformFee       Int?
+  rawVerifyResponse Json?
+  failureReason     String?
+  reviewReason      String?
+  verifiedAt        DateTime?
+  succeededAt       DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  receipt Receipt?
+
+  @@index([schoolId, status])
+  @@index([status, createdAt])
+  @@index([invoiceId])
+}
+
+model LedgerEntry {
+  id            String          @id @default(cuid())
+  schoolId      String
+  transactionId String
+  paymentId     String?
+  invoiceId     String?
+  account       LedgerAccount
+  direction     LedgerDirection
+  amount        Int
+  currency      String          @default("ETB")
+  memo          String
+  createdAt     DateTime        @default(now())
+
+  @@index([schoolId, account])
+  @@index([transactionId])
+  @@index([paymentId])
+}
+
+model Receipt {
+  id          String   @id @default(cuid())
+  schoolId    String
+  school      School   @relation(fields: [schoolId], references: [id])
+  paymentId   String   @unique
+  payment     Payment  @relation(fields: [paymentId], references: [id])
+  invoiceId   String
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+  receiptNo   String
+  sequence    Int
+  payload     Json
+  payloadHash String   @unique
+  prevHash    String?
+  signature   String
+  keyId       String
+  pdfKey      String?
+  issuedAt    DateTime
+  createdAt   DateTime @default(now())
+
+  @@unique([schoolId, sequence])
+  @@unique([schoolId, receiptNo])
+}
+
+model WebhookEvent {
+  id             String             @id @default(cuid())
+  gateway        String
+  eventKey       String             @unique
+  eventType      String
+  txRef          String?
+  signatureValid Boolean
+  payload        Json
+  status         WebhookEventStatus @default(RECEIVED)
+  attempts       Int                @default(0)
+  error          String?
+  receivedAt     DateTime           @default(now())
+  processedAt    DateTime?
+
+  @@index([txRef])
+}
+
+model IdempotencyKey {
+  id             String   @id @default(cuid())
+  scope          String
+  key            String
+  requestHash    String
+  responseStatus Int?
+  responseBody   Json?
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  @@unique([scope, key])
+  @@index([expiresAt])
+}
+
+model SmsMessage {
+  id                String        @id @default(cuid())
+  schoolId          String?
+  to                String
+  body              String
+  template          String
+  provider          String?
+  providerMessageId String?
+  status            MessageStatus @default(QUEUED)
+  attempts          Int           @default(0)
+  error             String?
+  relatedType       String?
+  relatedId         String?
+  createdAt         DateTime      @default(now())
+  sentAt            DateTime?
+
+  @@index([schoolId, createdAt])
+}
+
+model EmailMessage {
+  id          String        @id @default(cuid())
+  schoolId    String?
+  to          String
+  subject     String
+  template    String
+  status      MessageStatus @default(QUEUED)
+  attempts    Int           @default(0)
+  error       String?
+  relatedType String?
+  relatedId   String?
+  createdAt   DateTime      @default(now())
+  sentAt      DateTime?
+
+  @@index([schoolId, createdAt])
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  schoolId    String
+  school      School    @relation(fields: [schoolId], references: [id])
+  name        String
+  prefix      String
+  keyHash     String    @unique
+  scopes      String[]
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  createdById String
+  createdAt   DateTime  @default(now())
+
+  @@index([schoolId])
+}
+
+model WebhookEndpoint {
+  id              String   @id @default(cuid())
+  schoolId        String
+  school          School   @relation(fields: [schoolId], references: [id])
+  url             String
+  secretEncrypted String
+  events          String[]
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([schoolId])
+}
+
+model WebhookDelivery {
+  id             String          @id @default(cuid())
+  schoolId       String
+  endpointId     String
+  endpoint       WebhookEndpoint @relation(fields: [endpointId], references: [id])
+  event          String
+  payload        Json
+  status         DeliveryStatus  @default(PENDING)
+  attempts       Int             @default(0)
+  responseStatus Int?
+  lastError      String?
+  createdAt      DateTime        @default(now())
+  deliveredAt    DateTime?
+
+  @@index([endpointId, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  schoolId   String?
+  actorType  String
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([schoolId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model ReconciliationRun {
+  id           String    @id @default(cuid())
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  checkedCount Int       @default(0)
+  issueCount   Int       @default(0)
+  error        String?
+
+  issues ReconciliationIssue[]
+}
+
+model ReconciliationIssue {
+  id               String            @id @default(cuid())
+  runId            String?
+  run              ReconciliationRun? @relation(fields: [runId], references: [id])
+  schoolId         String?
+  kind             String
+  txRef            String?
+  gatewayReference String?
+  details          Json
+  status           IssueStatus       @default(OPEN)
+  resolvedAt       DateTime?
+  resolvedById     String?
+  resolutionNote   String?
+  createdAt        DateTime          @default(now())
+
+  @@index([status, createdAt])
+  @@index([schoolId])
+}

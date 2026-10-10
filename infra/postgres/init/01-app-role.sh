@@ -1,0 +1,21 @@
+#!/bin/sh
+# Creates the least-privileged role the API connects with. It is not a superuser and
+# does not own the tables, so PostgreSQL Row-Level Security policies apply to it.
+set -e
+
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+  DO \$\$
+  BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${APP_DB_USER}') THEN
+      CREATE ROLE ${APP_DB_USER} LOGIN PASSWORD '${APP_DB_PASSWORD}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
+  END
+  \$\$;
+
+  GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO ${APP_DB_USER};
+  GRANT USAGE ON SCHEMA public TO ${APP_DB_USER};
+  ALTER DEFAULT PRIVILEGES FOR ROLE ${POSTGRES_USER} IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${APP_DB_USER};
+  ALTER DEFAULT PRIVILEGES FOR ROLE ${POSTGRES_USER} IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO ${APP_DB_USER};
+EOSQL
