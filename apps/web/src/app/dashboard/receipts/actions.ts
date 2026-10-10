@@ -11,7 +11,8 @@ export async function verifyChainAction(): Promise<FormState> {
       { method: 'POST' },
     );
     revalidatePath('/dashboard/receipts');
-    if (result.valid) return { success: `Chain is valid (${result.receipts} receipts).` };
+    const noun = result.receipts === 1 ? 'receipt' : 'receipts';
+    if (result.valid) return { success: `Chain is valid (${result.receipts} ${noun}).` };
     return { error: `Chain broken: ${result.problems.map((problem) => `${problem.receiptNo} ${problem.problem}`).join('; ')}` };
   } catch (error) {
     return { error: errorMessage(error) };
