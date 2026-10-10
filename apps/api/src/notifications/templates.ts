@@ -1,5 +1,26 @@
 import { formatEtb, formatEthiopianDate, type Language } from '@payment/shared';
 
+const ADDIS_ABABA = 'Africa/Addis_Ababa';
+
+/** Civil date in Addis Ababa, YYYY-MM-DD. */
+export function addisCalendarDate(value: Date): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: ADDIS_ABABA, year: 'numeric', month: '2-digit', day: '2-digit' }).format(value);
+}
+
+/** UTC midnight of an Addis Ababa civil date, suitable for a Postgres `date` column. */
+export function addisDateOnly(now = new Date(), offsetDays = 0): Date {
+  const [year, month, day] = addisCalendarDate(now).split('-').map(Number);
+  return new Date(Date.UTC(year ?? 1970, (month ?? 1) - 1, (day ?? 1) + offsetDays));
+}
+
+/**
+ * Invoice due dates are calendar dates. The deadline has passed only after that whole day in
+ * Addis Ababa, not at 00:00 UTC (which is still evening the day before in Ethiopia).
+ */
+export function dueDatePassed(dueDate: Date, now = new Date()): boolean {
+  return dueDate.toISOString().slice(0, 10) < addisCalendarDate(now);
+}
+
 function gregorian(date: Date): string {
   return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Africa/Addis_Ababa' }).format(date);
 }
@@ -40,7 +61,7 @@ export const smsTemplates = {
   },
 
   invoiceReminder(language: Language, data: InvoiceMessageData): string {
-    const overdue = data.dueDate.getTime() < Date.now();
+    const overdue = dueDatePassed(data.dueDate);
     if (language === 'am') {
       return overdue
         ? `${data.school}: ማስታወሻ - የ${data.student} ክፍያ ${birr(data.amount, 'am')} የመጨረሻ ቀኑ (${date(data.dueDate, 'am')}) አልፏል። ለመክፈል: ${data.link}`

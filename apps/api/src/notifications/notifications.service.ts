@@ -6,7 +6,7 @@ import { JOBS, QUEUES } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
 import { EmailService } from './email/email.service';
 import { SmsService } from './sms/sms.service';
-import { emailTemplates, smsTemplates } from './templates';
+import { addisDateOnly, emailTemplates, smsTemplates } from './templates';
 
 const REMINDER_DAYS_BEFORE_DUE = 3;
 const OVERDUE_REMINDER_INTERVAL_DAYS = 7;
@@ -157,11 +157,11 @@ export class NotificationsService implements OnModuleInit {
    * overdue (for up to OVERDUE_REMINDER_MAX_AGE_DAYS). Only active schools.
    */
   async sendScheduledReminders(): Promise<{ invoices: number; messages: number }> {
-    const now = Date.now();
-    const today = new Date(new Date(now).toISOString().slice(0, 10) + 'T00:00:00.000Z');
-    const upcoming = new Date(today.getTime() + REMINDER_DAYS_BEFORE_DUE * DAY_MS);
-    const repeatBefore = new Date(now - OVERDUE_REMINDER_INTERVAL_DAYS * DAY_MS + 3600 * 1000);
-    const oldest = new Date(today.getTime() - OVERDUE_REMINDER_MAX_AGE_DAYS * DAY_MS);
+    const now = new Date();
+    const today = addisDateOnly(now);
+    const upcoming = addisDateOnly(now, REMINDER_DAYS_BEFORE_DUE);
+    const repeatBefore = new Date(now.getTime() - OVERDUE_REMINDER_INTERVAL_DAYS * DAY_MS + 3600 * 1000);
+    const oldest = addisDateOnly(now, -OVERDUE_REMINDER_MAX_AGE_DAYS);
 
     let invoices = 0;
     let messages = 0;
