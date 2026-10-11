@@ -3,7 +3,8 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createPrismaClient, type PrismaClient } from '@payment/db';
 import { verifyReceiptSignature } from '@payment/shared';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import request from 'supertest';
 
 const E2E_PORT = 4100;
@@ -204,5 +205,97 @@ describe('Payment flow (mock gateway, real Postgres + Redis)', () => {
     expect(allowed.status).toBe(200);
     const denied = await http.get('/invoices').set('X-Api-Key', key.body.key);
     expect(denied.status).toBe(403);
+  });
+
+  it('addresses students by code on /v1 and signs outbound webhooks', async () => {
+    const auth = { Authorization: `Bearer ${accessToken}` };
+    const key = await http.post('/integrations/api-keys').set(auth).send({
+      name: 'SIS integration',
+      scopes: ['students:read', 'invoices:read', 'invoices:write', 'payments:read', 'receipts:read'],
+    });
+    expect(key.status).toBe(201);
+    const apiKey = key.body.key as string;
+
+    const balance = await http.get(`/v1/students/S-${suffix}/balance`).set('X-Api-Key', apiKey);
+    expect(balance.status).toBe(200);
+    expect(balance.body.student.code).toBe(`S-${suffix}`);
+    expect(balance.body.currency).toBe('ETB');
+    expect(balance.body.balance).toBe(0);
+
+    const narrow = await http.post('/integrations/api-keys').set(auth).send({ name: 'Invoices only', scopes: ['invoices:read'] });
+    expect(narrow.status).toBe(201);
+    const missingScope = await http.get(`/v1/students/S-${suffix}/balance`).set('X-Api-Key', narrow.body.key);
+    expect(missingScope.status).toBe(403);
+
+    const idemKey = `e2e-v1-invoice-${suffix}`;
+    const body = {
+      studentCode: `S-${suffix}`,
+      term: 'Term 1',
+      dueDate: '2026-12-31',
+      lines: [{ description: 'Books', amount: 12_500 }],
+      notify: false,
+    };
+    const created = await http.post('/v1/invoices').set('X-Api-Key', apiKey).set('Idempotency-Key', idemKey).send(body);
+    expect(created.status).toBe(201);
+    expect(created.body.balance).toBe(12_500);
+    expect(created.body.payUrl).toContain('/pay/');
+    const replay = await http.post('/v1/invoices').set('X-Api-Key', apiKey).set('Idempotency-Key', idemKey).send(body);
+    expect(replay.headers['idempotent-replayed']).toBe('true');
+    expect(replay.body.number).toBe(created.body.number);
+
+    const invoice = await http.get(`/v1/invoices/${created.body.number}`).set('X-Api-Key', apiKey);
+    expect(invoice.status).toBe(200);
+    expect(invoice.body.student.code).toBe(`S-${suffix}`);
+
+    const paymentRow = await owner.payment.findFirstOrThrow({
+      where: { schoolId, status: 'SUCCEEDED' },
+      include: { receipt: true },
+    });
+    const payment = await http.get(`/v1/payments/${paymentRow.txRef}`).set('X-Api-Key', apiKey);
+    expect(payment.status).toBe(200);
+    expect(payment.body.status).toBe('SUCCEEDED');
+    expect(payment.body.receipt.receiptNo).toBe(paymentRow.receipt?.receiptNo);
+
+    const receipt = await http.get(`/v1/receipts/${paymentRow.receipt?.receiptNo}`).set('X-Api-Key', apiKey);
+    expect(receipt.status).toBe(200);
+    const keys = await http.get('/.well-known/receipt-keys.json');
+    const verified = await verifyReceiptSignature(keys.body.keys, { payload: receipt.body.payload, signature: receipt.body.signature });
+    expect(verified.valid).toBe(true);
+    expect(receipt.body.qr).toContain('#');
+
+    const received: { raw: string; signature: string; timestamp: string }[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        received.push({
+          raw: Buffer.concat(chunks).toString('utf8'),
+          signature: String(req.headers['x-payment-signature'] ?? ''),
+          timestamp: String(req.headers['x-payment-timestamp'] ?? ''),
+        });
+        res.writeHead(200);
+        res.end('ok');
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const address = server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    try {
+      const endpoint = await http.post('/integrations/webhooks').set(auth).send({
+        url: `http://localhost:${port}/hooks`,
+        events: ['invoice.created'],
+      });
+      expect(endpoint.status).toBe(201);
+      const ping = await http.post(`/integrations/webhooks/${endpoint.body.id}/ping`).set(auth);
+      expect(ping.status).toBe(201);
+      const event = await waitFor(async () => received[0]);
+      const expected = createHmac('sha256', endpoint.body.secret as string)
+        .update(`${event.timestamp}.${event.raw}`)
+        .digest('hex');
+      expect(event.signature).toBe(expected);
+      expect(JSON.parse(event.raw).event).toBe('ping');
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
   });
 });
