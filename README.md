@@ -104,7 +104,7 @@ Logs must never contain secrets, full phone numbers, TOTP seeds, or card data.
 6. SMTP that is not Mailpit. Send a receipt PDF to a real mailbox.
 7. Platform admin and every school admin/accountant enrolled in TOTP. Disable unused seed users.
 8. Web is the only public hostname. API bound to a private network. TLS everywhere. `NODE_ENV=production`.
-9. RLS: connect as `payment_app`, `SET app.current_school` to a foreign id, confirm zero rows.
+9. RLS: connect as `payment_app`, `SELECT set_config('app.school_id', '<other-school-id>', true)` inside a transaction, confirm zero rows.
 10. Run `pnpm --filter @payment/api test` and `test:e2e` against a staging database.
 11. First nightly reconciliation reviewed. CSV export of receipts for the accountant.
 12. Download `/receipts/offline-verifier.html` and keep a copy with the school.

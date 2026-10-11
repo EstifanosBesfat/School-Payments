@@ -5,7 +5,7 @@ import { APP_ENV, type AppEnv } from '../config/config.module';
 import { GatewayRegistry } from '../gateways/gateway.registry';
 import type { GatewayTransactionSummary } from '../gateways/payment-gateway.interface';
 import { PaymentsService } from '../payments/payments.service';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type Tx } from '../prisma/prisma.service';
 import { JOBS, QUEUES } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
 import { ReceiptsService } from '../receipts/receipts.service';
@@ -224,20 +224,25 @@ export class ReconciliationService implements OnModuleInit {
     const where: Prisma.ReconciliationIssueWhereInput = {};
     if (filter.schoolId) where.schoolId = filter.schoolId;
     if (filter.status) where.status = filter.status;
-    return Promise.all([
-      this.prisma.db.reconciliationIssue.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (filter.page - 1) * filter.pageSize, take: filter.pageSize }),
-      this.prisma.db.reconciliationIssue.count({ where }),
-    ]).then(([items, total]) => ({ items, total, page: filter.page, pageSize: filter.pageSize }));
+    const load = async (tx: Tx | PrismaService['db']) => {
+      const items = await tx.reconciliationIssue.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (filter.page - 1) * filter.pageSize, take: filter.pageSize });
+      const total = await tx.reconciliationIssue.count({ where });
+      return { items, total, page: filter.page, pageSize: filter.pageSize };
+    };
+    return filter.schoolId ? this.prisma.tenant(filter.schoolId, load) : load(this.prisma.db);
   }
 
   async resolve(issueId: string, note: string, principal: Principal, schoolId?: string) {
-    const issue = await this.prisma.db.reconciliationIssue.findFirst({ where: { id: issueId, ...(schoolId ? { schoolId } : {}) } });
-    if (!issue) throw new NotFoundException('Issue not found');
-    const updated = await this.prisma.db.reconciliationIssue.update({
-      where: { id: issueId },
-      data: { status: 'RESOLVED', resolvedAt: new Date(), resolvedById: principal.type === 'user' ? principal.userId : null, resolutionNote: note },
-    });
-    await this.audit.record({ schoolId: issue.schoolId, principal, action: 'reconciliation_issue.resolved', entityType: 'ReconciliationIssue', entityId: issueId, metadata: { note, kind: issue.kind } });
-    return updated;
+    const apply = async (tx: Tx | PrismaService['db']) => {
+      const issue = await tx.reconciliationIssue.findFirst({ where: { id: issueId, ...(schoolId ? { schoolId } : {}) } });
+      if (!issue) throw new NotFoundException('Issue not found');
+      const updated = await tx.reconciliationIssue.update({
+        where: { id: issueId },
+        data: { status: 'RESOLVED', resolvedAt: new Date(), resolvedById: principal.type === 'user' ? principal.userId : null, resolutionNote: note },
+      });
+      await this.audit.record({ schoolId: issue.schoolId, principal, action: 'reconciliation_issue.resolved', entityType: 'ReconciliationIssue', entityId: issueId, metadata: { note, kind: issue.kind } }, tx);
+      return updated;
+    };
+    return schoolId ? this.prisma.tenant(schoolId, apply) : apply(this.prisma.db);
   }
 }

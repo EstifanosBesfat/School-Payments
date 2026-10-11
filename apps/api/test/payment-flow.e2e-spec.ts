@@ -195,6 +195,38 @@ describe('Payment flow (mock gateway, real Postgres + Redis)', () => {
       return tx.payment.count({ where: { schoolId } });
     });
     expect(own).toBe(1);
+
+    const issue = await owner.reconciliationIssue.create({
+      data: { schoolId, kind: 'amount_mismatch', txRef: `RECON-${suffix}`, details: { amount: 100 } },
+    });
+    const hiddenIssue = await appRole.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('app.school_id', 'some-other-school', true)`;
+      return tx.reconciliationIssue.findUnique({ where: { id: issue.id } });
+    });
+    expect(hiddenIssue).toBeNull();
+    const visibleIssue = await appRole.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('app.school_id', ${schoolId}, true)`;
+      return tx.reconciliationIssue.findUnique({ where: { id: issue.id } });
+    });
+    expect(visibleIssue?.kind).toBe('amount_mismatch');
+
+    const auth = { Authorization: `Bearer ${accessToken}` };
+    const listed = await http.get('/reconciliation/issues').set(auth).query({ status: 'OPEN' });
+    expect(listed.status).toBe(200);
+    expect(listed.body.items.some((item: { id: string }) => item.id === issue.id)).toBe(true);
+    const otherSchool = await owner.school.create({
+      data: { name: `Other ${suffix}`, code: `OTH${suffix}`, status: 'ACTIVE', contactEmail: 'other@e2e.test', contactPhone: '+251911000002' },
+    });
+    const foreign = await owner.reconciliationIssue.create({
+      data: { schoolId: otherSchool.id, kind: 'status_mismatch', txRef: `RECON-OTH-${suffix}`, details: { amount: 50 } },
+    });
+    const stillOwn = await http.get('/reconciliation/issues').set(auth).query({ status: 'OPEN' });
+    expect(stillOwn.body.items.some((item: { id: string }) => item.id === foreign.id)).toBe(false);
+    const resolved = await http.post(`/reconciliation/issues/${issue.id}/resolve`).set(auth).send({ note: 'Checked against the gateway export' });
+    expect(resolved.status).toBe(201);
+    expect(resolved.body.status).toBe('RESOLVED');
+    const cannotRun = await http.post('/reconciliation/run').set(auth);
+    expect(cannotRun.status).toBe(403);
   });
 
   it('rejects API keys without the needed scope', async () => {
