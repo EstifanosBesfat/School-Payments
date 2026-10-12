@@ -13,3 +13,4 @@ packages/db/src/generated/
 storage/
 keys/
 *.pem
+backups/

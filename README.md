@@ -72,14 +72,40 @@ Storage: local disk is for development. In production set `STORAGE_DRIVER=s3` (C
 
 ## Backups
 
-| What                 | How                                                                                                                                                               |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Postgres             | Nightly `pg_dump` of the `payment` database (owner role). Retain at least 30 days. Test restore on a copy.                                                        |
-| Receipt PDFs         | Versioned S3/R2 bucket with object lock or versioning.                                                                                                            |
-| Receipt signing keys | Offline copy of the Ed25519 private key. Losing it means new receipts cannot be issued with that key id; old receipts still verify with the published public key. |
-| Redis                | AOF is enabled in compose. Treat Redis as ephemeral: jobs retry, but do not store the only copy of money data there.                                              |
+Implemented and tested: a custom-format `pg_dump` (`-Fc`) of the database named by `MIGRATION_DATABASE_URL`, a SHA-256 sidecar, and a restore into a disposable Postgres container that is not the application database. The verifier uses synthetic rows only. It checks the school, student, invoice, payment, both ledger entries, the receipt hash chain, the Ed25519 signature (with the public key still in memory for that run), the audit row, and the webhook event. It does not delete older backup files.
 
-Point-in-time recovery: enable Postgres WAL archiving (or your host’s PITR) before going live.
+```bash
+pnpm db:backup
+pnpm db:restore-verify
+pnpm test:backup
+```
+
+`pnpm db:backup` reads `MIGRATION_DATABASE_URL` from the environment or `.env` and writes `BACKUP_DIR` (default `backups/`). The password is passed to `pg_dump` through `PGPASSWORD`, not printed. A non-zero `pg_dump`, a file that does not start with `PGDMP`, or a checksum mismatch fails the command. Confirm a checksum with:
+
+```bash
+node --input-type=module -e "import { verifyChecksum } from './scripts/backup/lib.mjs'; console.log(await verifyChecksum(process.argv[1]))" -- backups/payment-<stamp>.dump
+```
+
+`pnpm db:restore-verify` restores a new synthetic backup into databases named `backup_src` and `backup_dst` on a random host port. It removes only the `payment-backup-verify-*` container it created. It refuses a target whose host, port, and database name match the application database (`localhost`, `127.0.0.1`, and `::1` count as the same host).
+
+What the dump contains: the Postgres database, including schema migrations, schools, students, invoices, payments, ledger entries, receipts (payload, hash, signature, key id), audit logs, and webhook rows.
+
+What the dump does not contain, and a restore will not bring back:
+
+- Redis, BullMQ jobs, and rate-limit counters
+- Receipt PDF files (`storage/` locally, or the S3/R2 bucket)
+- Ed25519 signing keys, `DATA_ENCRYPTION_KEY`, JWT secrets, gateway secrets, and the rest of `.env`
+- Records that exist only at Chapa or another gateway
+- WAL files. This is not point-in-time recovery.
+
+Recommendations that this repository does not perform for you: copy each dump and its `.sha256` file to a separate host or object store, encrypt that copy at rest, restrict who can read it, and keep at least 30 days. Run `pnpm db:restore-verify` on a schedule so a backup is proven restorable before you need it. Losing the receipt private key stops new signatures for that key id; old receipts still verify with the published public key, which is also outside the dump.
+
+| What                 | Status                                                                                                                                                                 |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Postgres             | `pnpm db:backup` writes a custom-format dump and checksum. Restore is checked by `pnpm db:restore-verify`. Retention, off-site copy, and encryption are not automated. |
+| Receipt PDFs         | Not in Postgres. Use a versioned S3/R2 bucket in production.                                                                                                           |
+| Receipt signing keys | Not in Postgres. Keep an offline copy of the Ed25519 private key.                                                                                                      |
+| Redis                | Not in the dump. AOF in compose is local durability only. Treat Redis as ephemeral.                                                                                    |
 
 ## Monitoring
 
@@ -116,4 +142,5 @@ pnpm --filter @payment/shared test
 pnpm --filter @payment/api test
 pnpm --filter @payment/api test:e2e
 pnpm --filter @payment/web typecheck
+pnpm test:backup
 ```

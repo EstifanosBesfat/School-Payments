@@ -19,6 +19,9 @@
     "db:migrate": "pnpm --filter @payment/db migrate:dev",
     "db:deploy": "pnpm --filter @payment/db migrate:deploy",
     "db:seed": "pnpm --filter @payment/db seed",
+    "db:backup": "node scripts/backup/backup.mjs",
+    "db:restore-verify": "node scripts/backup/restore-verify.mjs",
+    "test:backup": "node --test scripts/backup/backup.test.mjs",
     "keys:generate": "pnpm --filter @payment/api keys:generate"
   },
   "devDependencies": {
