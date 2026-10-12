@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useState, useTransition } from 'react';
+import { useActionState, useEffect, useState, useTransition } from 'react';
 import { Button } from '@/components/ui/button';
 import { Field, FormMessage, Input } from '@/components/ui/form';
 import { beginSetupAction, enableTotpAction, type TotpSetupState } from './actions';
@@ -10,9 +10,14 @@ export function SetupForm() {
   const [starting, startTransition] = useTransition();
   const [state, enable, enabling] = useActionState<TotpSetupState, FormData>(enableTotpAction, {});
 
+  useEffect(() => {
+    startTransition(async () => setSetup(await beginSetupAction()));
+  }, []);
+
   if (!setup?.qrCodeDataUrl) {
     return (
       <div className="space-y-4">
+        <p className="text-sm text-gray-500">{starting ? 'Preparing your QR code…' : 'The QR code could not be loaded.'}</p>
         <FormMessage state={setup} />
         <Button className="w-full" disabled={starting} onClick={() => startTransition(async () => setSetup(await beginSetupAction()))}>
           {starting ? 'Preparing…' : 'Show QR code'}

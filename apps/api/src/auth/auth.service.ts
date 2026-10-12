@@ -208,8 +208,26 @@ export class AuthService {
   async beginTotpSetup(userId: string): Promise<{ otpauthUrl: string; qrCodeDataUrl: string; secret: string }> {
     const user = await this.prisma.db.user.findUniqueOrThrow({ where: { id: userId } });
     if (user.totpEnabled) throw new BadRequestException('Two-factor authentication is already enabled');
-    const secret = generateTotpSecret();
-    await this.prisma.db.user.update({ where: { id: userId }, data: { totpSecretEncrypted: this.secrets.encrypt(secret) } });
+
+    // Keep the pending secret until enrollment finishes, so a refresh does not replace the QR already on screen.
+    let secret = user.totpSecretEncrypted ? this.secrets.decrypt(user.totpSecretEncrypted) : null;
+    if (!secret) {
+      const generated = generateTotpSecret();
+      const saved = await this.prisma.db.user.updateMany({
+        where: { id: userId, totpEnabled: false, totpSecretEncrypted: null },
+        data: { totpSecretEncrypted: this.secrets.encrypt(generated) },
+      });
+      if (saved.count === 1) {
+        secret = generated;
+      } else {
+        const fresh = await this.prisma.db.user.findUniqueOrThrow({ where: { id: userId } });
+        if (fresh.totpEnabled || !fresh.totpSecretEncrypted) {
+          throw new BadRequestException('Two-factor authentication is already enabled');
+        }
+        secret = this.secrets.decrypt(fresh.totpSecretEncrypted);
+      }
+    }
+
     const url = otpauthUrl(secret, user.email, TOTP_ISSUER);
     return { otpauthUrl: url, qrCodeDataUrl: await QRCode.toDataURL(url, { margin: 1, width: 240 }), secret };
   }

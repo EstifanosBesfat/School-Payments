@@ -17,7 +17,7 @@ export function LoginForm({ next }: { next?: string }) {
         <Input id="password" name="password" type="password" autoComplete="current-password" required />
       </Field>
       {state.needTotp ? (
-        <Field label="Authenticator code" htmlFor="totpCode" hint="6 digits from Google Authenticator, Microsoft Authenticator or similar">
+        <Field label="Authenticator code" htmlFor="totpCode" hint="6 digits from the authenticator app already paired with this account.">
           <Input id="totpCode" name="totpCode" inputMode="numeric" pattern="\d{6}" maxLength={6} autoComplete="one-time-code" autoFocus required />
         </Field>
       ) : null}
