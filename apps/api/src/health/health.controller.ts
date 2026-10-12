@@ -2,19 +2,16 @@ import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../common/decorators';
-import { PrismaService } from '../prisma/prisma.service';
-import { QueueService } from '../queue/queue.service';
+import { HealthService } from './health.service';
 
 @ApiTags('health')
 @Public()
 @SkipThrottle()
 @Controller('health')
 export class HealthController {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly queues: QueueService,
-  ) {}
+  constructor(private readonly health: HealthService) {}
 
+  /** Process liveness. Does not call PostgreSQL, Redis, Chapa, or SMS. */
   @Get('live')
   live() {
     return { status: 'ok' };
@@ -22,14 +19,8 @@ export class HealthController {
 
   @Get('ready')
   async ready() {
-    const checks: Record<string, 'ok' | 'down'> = { database: 'down', redis: 'down' };
-    await this.prisma.db.$queryRaw`SELECT 1`.then(() => (checks.database = 'ok')).catch(() => undefined);
-    await this.queues.connection
-      .ping()
-      .then(() => (checks.redis = 'ok'))
-      .catch(() => undefined);
-    const healthy = Object.values(checks).every((value) => value === 'ok');
-    if (!healthy) throw new ServiceUnavailableException({ status: 'degraded', checks });
-    return { status: 'ok', checks };
+    const report = await this.health.ready();
+    if (report.status !== 'ok') throw new ServiceUnavailableException(report);
+    return report;
   }
 }

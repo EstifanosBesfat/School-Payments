@@ -6,4 +6,6 @@
 FROM payment-api
 ENV RUN_WORKERS=true
 USER node
+# The worker process does not listen on HTTP, so it must not inherit the API liveness probe.
+HEALTHCHECK NONE
 CMD ["node", "dist/worker.js"]

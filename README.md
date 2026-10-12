@@ -109,9 +109,15 @@ Recommendations that this repository does not perform for you: copy each dump an
 
 ## Monitoring
 
+`GET /health/live` returns `200` and `{ "status": "ok" }` when the API process can respond. It does not contact PostgreSQL, Redis, Chapa, or SMS.
+
+`GET /health/ready` returns `200` and `{ "status": "ok", "checks": { "database": "ok", "redis": "ok" } }` when both required local dependencies answer within 2 seconds. If either is down or too slow, the response is `503` and `{ "status": "degraded", "checks": { ... } }` with each check set to `ok` or `down`. That means the API should be taken out of rotation: payment routes need Postgres, and rate limits plus queueing need Redis. Chapa and SMS are not part of readiness, because stored invoices, receipts, and sign-in do not require them on every request. The body never includes connection strings, credentials, or the underlying error. The server log says only which check failed and whether it was a timeout or an error.
+
+An unhealthy readiness check does not exit the process. Compose health checks on Postgres (`pg_isready`) and Redis (`redis-cli ping`) describe those containers only. The API image probes `/health/live` with `wget`. The worker image has no HTTP probe, because that process does not listen. Docker's `HEALTHCHECK` and Compose's `restart: unless-stopped` do not restart a container just because a probe fails. Nothing in this repository configures an orchestrator to do that.
+
 Watch these and page a human:
 
-- `/health/live` and `/health/ready` on the API (DB + Redis)
+- `/health/ready` returning `503`, or a `database` / `redis` check of `down`
 - Queue lag (BullMQ: webhooks, payments, receipts, notifications, outbound)
 - `ReconciliationIssue` rows with status `OPEN` (nightly job at 02:30 Africa/Addis_Ababa)
 - 5xx rate on web and API

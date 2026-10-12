@@ -9,6 +9,7 @@ import { RedisThrottlerStorage } from './common/redis-throttler.storage';
 import { ConfigModule } from './config/config.module';
 import { GatewaysModule } from './gateways/gateways.module';
 import { HealthController } from './health/health.controller';
+import { HealthService } from './health/health.service';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -64,5 +65,6 @@ class RateLimitModule {}
     ReconciliationModule,
   ],
   controllers: [HealthController],
+  providers: [HealthService],
 })
 export class AppModule {}
