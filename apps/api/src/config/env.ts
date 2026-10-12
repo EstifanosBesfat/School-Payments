@@ -24,13 +24,18 @@ const envSchema = z
 
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.string().min(1),
+    /** Comma-separated peers allowed to set a single-IP X-Forwarded-For. Everyone else is limited by the socket address. */
+    TRUSTED_PROXIES: z.string().default(''),
 
     JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be at least 32 characters'),
     ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
     REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(14),
     DATA_ENCRYPTION_KEY: z
       .string()
-      .refine((value) => Buffer.from(value, 'base64').length === 32, 'DATA_ENCRYPTION_KEY must be 32 bytes, base64'),
+      .refine(
+        (value) => Buffer.from(value, 'base64').length === 32,
+        'DATA_ENCRYPTION_KEY must be 32 bytes, base64',
+      ),
 
     RECEIPT_SIGNING_KEY_ID: z.string().min(1),
     RECEIPT_SIGNING_PRIVATE_KEY: z.string().min(1),
@@ -71,20 +76,35 @@ const envSchema = z
   })
   .superRefine((env, ctx) => {
     if (env.PAYMENT_GATEWAY === 'chapa' && (!env.CHAPA_SECRET_KEY || !env.CHAPA_WEBHOOK_SECRET)) {
-      ctx.addIssue({ code: 'custom', message: 'CHAPA_SECRET_KEY and CHAPA_WEBHOOK_SECRET are required for PAYMENT_GATEWAY=chapa' });
+      ctx.addIssue({
+        code: 'custom',
+        message: 'CHAPA_SECRET_KEY and CHAPA_WEBHOOK_SECRET are required for PAYMENT_GATEWAY=chapa',
+      });
     }
     if (env.NODE_ENV === 'production' && env.PAYMENT_GATEWAY === 'mock') {
       ctx.addIssue({ code: 'custom', message: 'The mock gateway cannot be used in production' });
     }
-    if (env.STORAGE_DRIVER === 's3' && (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY || !env.S3_SECRET_KEY)) {
-      ctx.addIssue({ code: 'custom', message: 'S3_ENDPOINT, S3_ACCESS_KEY and S3_SECRET_KEY are required for STORAGE_DRIVER=s3' });
+    if (
+      env.STORAGE_DRIVER === 's3' &&
+      (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY || !env.S3_SECRET_KEY)
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'S3_ENDPOINT, S3_ACCESS_KEY and S3_SECRET_KEY are required for STORAGE_DRIVER=s3',
+      });
     }
     const providers = [env.SMS_PROVIDER, env.SMS_FALLBACK_PROVIDER];
     if (providers.includes('afromessage') && !env.AFROMESSAGE_TOKEN) {
-      ctx.addIssue({ code: 'custom', message: 'AFROMESSAGE_TOKEN is required for the afromessage SMS provider' });
+      ctx.addIssue({
+        code: 'custom',
+        message: 'AFROMESSAGE_TOKEN is required for the afromessage SMS provider',
+      });
     }
     if (providers.includes('geezsms') && !env.GEEZSMS_TOKEN) {
-      ctx.addIssue({ code: 'custom', message: 'GEEZSMS_TOKEN is required for the geezsms SMS provider' });
+      ctx.addIssue({
+        code: 'custom',
+        message: 'GEEZSMS_TOKEN is required for the geezsms SMS provider',
+      });
     }
   });
 

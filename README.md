@@ -6,12 +6,12 @@ Parents pay from an SMS link (telebirr, CBE Birr, M-Pesa, card). Every successfu
 
 ## Layout
 
-| Path | Role |
-| --- | --- |
-| `apps/web` | Next.js 16 BFF. Session cookies stay httpOnly. Talks to the API over HTTP only. |
-| `apps/api` | NestJS 11. Database, gateway, SMS, email, storage, workers. |
-| `packages/db` | Prisma **7** schema, migrations, seed. |
-| `packages/shared` | Zod schemas, money (integer santim), receipt canonicalization, phone helpers. |
+| Path              | Role                                                                            |
+| ----------------- | ------------------------------------------------------------------------------- |
+| `apps/web`        | Next.js 16 BFF. Session cookies stay httpOnly. Talks to the API over HTTP only. |
+| `apps/api`        | NestJS 11. Database, gateway, SMS, email, storage, workers.                     |
+| `packages/db`     | Prisma **7** schema, migrations, seed.                                          |
+| `packages/shared` | Zod schemas, money (integer santim), receipt canonicalization, phone helpers.   |
 
 Why Prisma 7, not 8: Prisma 8 is still a release candidate (`8.0.0-rc.*`). This repo pins Prisma **7.10**, the current stable line, with the `prisma-client` generator and `@prisma/adapter-pg`.
 
@@ -49,8 +49,8 @@ Copy the public receipt key into `apps/web/.env.local` as `NEXT_PUBLIC_RECEIPT_P
 - The API connects as `payment_app` (no `BYPASSRLS`). Migrations run as `payment_owner`.
 - PostgreSQL RLS plus append-only triggers on ledger, audit log, payments and receipts.
 - Staff: Argon2id passwords + TOTP. Parents: SMS OTP, no password.
-- `apps/web` is the only public origin. The API sets `trust proxy 1` and trusts `X-Forwarded-For` from that hop.
-- **In production the API must not be reachable from the internet.** Put it behind the web app or a load balancer that strips incoming `X-Forwarded-For` and sets it itself. If clients can hit the API directly they can spoof client IPs used for rate limits and audit logs.
+- `apps/web` is the only public origin. It does not copy a browser-supplied `X-Forwarded-For` onto API calls.
+- The API trusts `X-Forwarded-For` only from peers listed in `TRUSTED_PROXIES`, and only when that header is a single IP. Every other caller is rate-limited by the socket address. Set `TRUSTED_PROXIES` to the load balancer that strips any client-supplied forwarding header and sets the real client address.
 
 ## Deployment
 
@@ -72,12 +72,12 @@ Storage: local disk is for development. In production set `STORAGE_DRIVER=s3` (C
 
 ## Backups
 
-| What | How |
-| --- | --- |
-| Postgres | Nightly `pg_dump` of the `payment` database (owner role). Retain at least 30 days. Test restore on a copy. |
-| Receipt PDFs | Versioned S3/R2 bucket with object lock or versioning. |
+| What                 | How                                                                                                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Postgres             | Nightly `pg_dump` of the `payment` database (owner role). Retain at least 30 days. Test restore on a copy.                                                        |
+| Receipt PDFs         | Versioned S3/R2 bucket with object lock or versioning.                                                                                                            |
 | Receipt signing keys | Offline copy of the Ed25519 private key. Losing it means new receipts cannot be issued with that key id; old receipts still verify with the published public key. |
-| Redis | AOF is enabled in compose. Treat Redis as ephemeral: jobs retry, but do not store the only copy of money data there. |
+| Redis                | AOF is enabled in compose. Treat Redis as ephemeral: jobs retry, but do not store the only copy of money data there.                                              |
 
 Point-in-time recovery: enable Postgres WAL archiving (or your host’s PITR) before going live.
 

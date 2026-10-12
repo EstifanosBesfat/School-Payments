@@ -28,22 +28,32 @@ export interface ApiRequestOptions {
 
 function messageFrom(body: unknown, status: number): { message: string; code?: string } {
   if (body && typeof body === 'object') {
-    const record = body as { message?: unknown; code?: unknown; issues?: { path?: string; message?: string }[] };
+    const record = body as {
+      message?: unknown;
+      code?: unknown;
+      issues?: { path?: string; message?: string }[];
+    };
     const code = typeof record.code === 'string' ? record.code : undefined;
     if (Array.isArray(record.issues) && record.issues.length > 0) {
-      return { message: record.issues.map((issue) => (issue.path ? `${issue.path}: ${issue.message}` : issue.message)).join('; '), code };
+      return {
+        message: record.issues
+          .map((issue) => (issue.path ? `${issue.path}: ${issue.message}` : issue.message))
+          .join('; '),
+        code,
+      };
     }
     if (typeof record.message === 'string') return { message: record.message, code };
     if (Array.isArray(record.message)) return { message: record.message.join('; '), code };
   }
-  return { message: status >= 500 ? 'The server had a problem. Please try again.' : `Request failed (${status})` };
+  return {
+    message:
+      status >= 500 ? 'The server had a problem. Please try again.' : `Request failed (${status})`,
+  };
 }
 
 export async function clientIpHeaders(): Promise<Record<string, string>> {
   const incoming = await headers();
-  const forwarded = incoming.get('x-forwarded-for')?.split(',')[0]?.trim() ?? incoming.get('x-real-ip') ?? '';
   const result: Record<string, string> = {};
-  if (forwarded) result['X-Forwarded-For'] = forwarded;
   const agent = incoming.get('user-agent');
   if (agent) result['User-Agent'] = agent;
   return result;
@@ -52,7 +62,8 @@ export async function clientIpHeaders(): Promise<Record<string, string>> {
 export function buildUrl(path: string, query?: ApiRequestOptions['query']): string {
   const url = new URL(path, API_URL);
   for (const [key, value] of Object.entries(query ?? {})) {
-    if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
+    if (value !== undefined && value !== null && value !== '')
+      url.searchParams.set(key, String(value));
   }
   return url.toString();
 }
@@ -60,9 +71,17 @@ export function buildUrl(path: string, query?: ApiRequestOptions['query']): stri
 /** Server-side call to the API. Staff and parent tokens live in httpOnly cookies and never reach the browser JS. */
 export async function api<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const store = await cookies();
-  const requestHeaders: Record<string, string> = { Accept: 'application/json', ...(await clientIpHeaders()) };
+  const requestHeaders: Record<string, string> = {
+    Accept: 'application/json',
+    ...(await clientIpHeaders()),
+  };
   const auth = options.auth ?? 'staff';
-  const token = auth === 'staff' ? store.get(ACCESS_COOKIE)?.value : auth === 'parent' ? store.get(PARENT_COOKIE)?.value : undefined;
+  const token =
+    auth === 'staff'
+      ? store.get(ACCESS_COOKIE)?.value
+      : auth === 'parent'
+        ? store.get(PARENT_COOKIE)?.value
+        : undefined;
   if (token) requestHeaders.Authorization = `Bearer ${token}`;
   if (options.body !== undefined) requestHeaders['Content-Type'] = 'application/json';
   if (options.idempotencyKey) requestHeaders['Idempotency-Key'] = options.idempotencyKey;
@@ -83,7 +102,10 @@ export async function api<T>(path: string, options: ApiRequestOptions = {}): Pro
 }
 
 /** For server components: send the user to sign in (or 2FA setup) instead of rendering an error. */
-export async function staffApi<T>(path: string, options: Omit<ApiRequestOptions, 'auth'> = {}): Promise<T> {
+export async function staffApi<T>(
+  path: string,
+  options: Omit<ApiRequestOptions, 'auth'> = {},
+): Promise<T> {
   try {
     return await api<T>(path, { ...options, auth: 'staff' });
   } catch (error) {

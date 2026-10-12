@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CommonModule } from './common/common.module';
+import { RateLimitGuard } from './common/rate-limit.guard';
 import { RedisThrottlerStorage } from './common/redis-throttler.storage';
 import { ConfigModule } from './config/config.module';
 import { GatewaysModule } from './gateways/gateways.module';
@@ -25,6 +26,12 @@ import { StudentsModule } from './students/students.module';
 import { TenantsModule } from './tenants/tenants.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 
+/** Registered before AuthModule so a rejected credential still consumes the caller's limit. */
+@Module({
+  providers: [{ provide: APP_GUARD, useClass: RateLimitGuard }],
+})
+class RateLimitModule {}
+
 @Module({
   imports: [
     ConfigModule,
@@ -38,6 +45,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
         storage: new RedisThrottlerStorage(queues.connection),
       }),
     }),
+    RateLimitModule,
     AuditModule,
     AuthModule,
     GatewaysModule,
@@ -56,6 +64,5 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     ReconciliationModule,
   ],
   controllers: [HealthController],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

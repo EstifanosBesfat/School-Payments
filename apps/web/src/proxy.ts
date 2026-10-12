@@ -1,5 +1,11 @@
 import { type NextRequest, NextResponse } from 'next/server';
-import { ACCESS_COOKIE, REFRESH_COOKIE, secondsUntilExpiry, type TokenPair, writeSessionCookies } from './lib/session';
+import {
+  ACCESS_COOKIE,
+  REFRESH_COOKIE,
+  secondsUntilExpiry,
+  type TokenPair,
+  writeSessionCookies,
+} from './lib/session';
 
 const API_URL = process.env.API_URL ?? 'http://localhost:4000';
 const REFRESH_BEFORE_SECONDS = 60;
@@ -23,12 +29,10 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   if (secondsUntilExpiry(access) > REFRESH_BEFORE_SECONDS) return NextResponse.next();
   if (!refresh) return toLogin(request);
 
-  const forwardedFor = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
   const result = await fetch(`${API_URL}/auth/refresh`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(forwardedFor ? { 'X-Forwarded-For': forwardedFor } : {}),
       'User-Agent': request.headers.get('user-agent') ?? 'web',
     },
     body: JSON.stringify({ refreshToken: refresh }),
