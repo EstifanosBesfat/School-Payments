@@ -17,10 +17,11 @@ COPY packages/shared packages/shared
 COPY packages/db packages/db
 COPY apps/api apps/api
 COPY tsconfig.base.json tsconfig.base.json
+# pnpm 10 will not deploy a workspace package unless its dependencies are injected or --legacy is set.
 RUN pnpm --filter @payment/shared build \
  && pnpm --filter @payment/db build \
  && pnpm --filter @payment/api build \
- && pnpm --filter @payment/api --prod deploy /out
+ && pnpm --filter @payment/api --prod deploy --legacy /out
 
 FROM node:22-alpine AS runner
 RUN apk add --no-cache libc6-compat openssl wget

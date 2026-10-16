@@ -10,7 +10,8 @@ import { AppModule } from './app.module';
 async function bootstrap(): Promise<void> {
   process.env.RUN_WORKERS = 'true';
   const app = await NestFactory.createApplicationContext(AppModule);
-  app.enableShutdownHooks();
+  // The image runs Node as PID 1. Re-raising SIGTERM after the hooks would be ignored.
+  app.enableShutdownHooks([], { useProcessExit: true });
   Logger.log('Worker started', 'Worker');
 }
 

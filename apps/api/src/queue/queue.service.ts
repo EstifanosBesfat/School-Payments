@@ -6,9 +6,10 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { type Job, type JobsOptions, Queue, Worker } from 'bullmq';
-import { Redis } from 'ioredis';
+import type { Redis } from 'ioredis';
 import { APP_ENV, type AppEnv } from '../config/config.module';
 import { QUEUES, type QueueName } from './queue.constants';
+import { attachRedisErrorHandler, createQueueRedis, redisErrorLabel } from './redis-connection';
 
 type JobHandler = (job: Job) => Promise<unknown>;
 
@@ -37,19 +38,27 @@ export class QueueService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly workers: Worker[] = [];
 
   constructor(@Inject(APP_ENV) private readonly env: AppEnv) {
-    this.connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null, lazyConnect: false });
+    this.connection = createQueueRedis(env.REDIS_URL, (message) => this.logger.warn(message));
   }
 
   queue(name: QueueName): Queue {
     let queue = this.queues.get(name);
     if (!queue) {
-      queue = new Queue(name, { connection: this.connection, defaultJobOptions: DEFAULT_JOB_OPTIONS });
+      queue = new Queue(name, {
+        connection: this.connection,
+        defaultJobOptions: DEFAULT_JOB_OPTIONS,
+      });
       this.queues.set(name, queue);
     }
     return queue;
   }
 
-  async add<T extends object>(name: QueueName, jobName: string, data: T, options?: JobsOptions): Promise<void> {
+  async add<T extends object>(
+    name: QueueName,
+    jobName: string,
+    data: T,
+    options?: JobsOptions,
+  ): Promise<void> {
     await this.queue(name).add(jobName, data, options);
   }
 
@@ -61,7 +70,12 @@ export class QueueService implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   /** Repeatable job (deduplicated across API instances by schedulerId). */
-  async schedule(name: QueueName, schedulerId: string, pattern: string, jobName: string): Promise<void> {
+  async schedule(
+    name: QueueName,
+    schedulerId: string,
+    pattern: string,
+    jobName: string,
+  ): Promise<void> {
     await this.queue(name).upsertJobScheduler(
       schedulerId,
       { pattern, tz: 'Africa/Addis_Ababa' },
@@ -82,8 +96,16 @@ export class QueueService implements OnApplicationBootstrap, OnModuleDestroy {
           if (!handler) throw new Error(`No handler for job ${job.name} on queue ${name}`);
           return handler(job);
         },
-        { connection: this.connection.duplicate(), concurrency: CONCURRENCY[name] },
+        {
+          connection: attachRedisErrorHandler(this.connection.duplicate(), (message) =>
+            this.logger.warn(message),
+          ),
+          concurrency: CONCURRENCY[name],
+        },
       );
+      worker.on('error', (error) => {
+        this.logger.warn(`Queue worker ${name} connection error (${redisErrorLabel(error)})`);
+      });
       worker.on('failed', (job, error) => {
         this.logger.warn(
           `Job ${job?.name ?? 'unknown'} (${job?.id ?? '?'}) on ${name} failed attempt ${job?.attemptsMade ?? 0}: ${error.message}`,

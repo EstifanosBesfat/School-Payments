@@ -54,21 +54,33 @@ Copy the public receipt key into `apps/web/.env.local` as `NEXT_PUBLIC_RECEIPT_P
 
 ## Deployment
 
+These commands build local images. They do not deploy anything to a hosting provider, and this repository has no live production environment wired up.
+
 ```bash
 docker build -f apps/api/Dockerfile -t payment-api .
 docker build -f apps/api/Dockerfile --target worker -t payment-worker .
 docker build -f apps/web/Dockerfile -t payment-web .
 ```
 
-Run three processes:
+The API image runs `node dist/main.js` as the `node` user, with `RUN_WORKERS=false`. Its Docker health check calls `/health/live` and does not restart the container. The worker image runs `node dist/worker.js` and has no HTTP health check, because that process does not listen. Both processes are PID 1 in their images, so shutdown hooks exit the process after `SIGTERM`. `docker stop` therefore lets the worker finish its current job and close Redis. A `SIGKILL` can interrupt a job; BullMQ retries it after the lock expires, and a payment that already settled does not get a second ledger write. The web image runs the Next.js standalone server. Set `API_URL` when starting the web container; server-side calls and session refresh read it at runtime. `NEXT_PUBLIC_RECEIPT_PUBLIC_KEYS` is still baked in at image build time because the browser verifier needs it.
 
-1. **API** — `payment-api` (`RUN_WORKERS=false`)
-2. **Worker** — `payment-worker`
-3. **Web** — `payment-web`, `API_URL` pointing at the internal API
+Run migrations once, from a checkout that has the Prisma CLI, before starting API replicas:
 
-Apply migrations before traffic: `pnpm db:deploy` using `MIGRATION_DATABASE_URL`.
+```bash
+pnpm db:deploy
+```
 
-Storage: local disk is for development. In production set `STORAGE_DRIVER=s3` (Cloudflare R2 or S3) so receipt PDFs survive deploys.
+That runs `prisma migrate deploy` with `MIGRATION_DATABASE_URL` (the table owner). It applies pending migrations and does not reset the database. The API and worker processes do not migrate on startup, so replicas do not race. Do not run `pnpm db:seed` against production.
+
+Start the images only after Postgres and Redis are reachable. Required API settings are listed in `.env.example`. In `NODE_ENV=production` the process refuses the mock gateway, the example `JWT_ACCESS_SECRET`, and a database URL that still contains the development role password. Generate real values; do not copy the example secrets. Chapa, SMS, and S3 credentials are required only for the providers you select. `SMS_PROVIDER=console` does not send SMS.
+
+Postgres needs a durable volume for its data directory. Redis needs a durable volume if queued jobs and rate-limit counters should survive a Redis restart (`appendonly yes` is what local Compose uses). Receipt PDFs are not in Postgres: `STORAGE_DRIVER=local` writes inside the container and is lost when that container is recreated. Production needs `STORAGE_DRIVER=s3`.
+
+`docker-compose.yml` is for local development. It publishes Postgres, Redis, and Mailpit on the host. It does not run the API, worker, or web, and it is not a production topology. Compose `restart: unless-stopped` restarts a container when its process exits. It does not restart a container because a health check failed.
+
+A disposable local check is `pnpm test:deploy`. It requires the `payment-api` and `payment-worker` images. It starts `payment-web` only when that image is already present. The check creates only `payment-deploy-check-*` containers, volumes, and a network, then removes them. It does not use the developer database. It covers image contents, liveness while dependencies are absent, readiness after they appear, a repeated `migrate deploy`, API and Postgres restarts, recreating Postgres on the same volume, Redis AOF, worker startup without an HTTP port, and a queued verification for a payment reference that does not exist. After a container restart, API readiness is read with `wget` inside the API container. It does not take a real Chapa payment or send SMS.
+
+What remains unverified until a real hosting environment exists: zero-downtime rollouts, orchestrator restarts, TLS, private networking so Postgres and Redis are not on a public interface, off-site backups, and S3 receipt storage.
 
 ## Backups
 

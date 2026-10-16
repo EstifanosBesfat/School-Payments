@@ -5,6 +5,7 @@ node_modules
 .git
 .turbo
 storage
+backups
 coverage
 *.log
 .env

@@ -85,6 +85,25 @@ const envSchema = z
       ctx.addIssue({ code: 'custom', message: 'The mock gateway cannot be used in production' });
     }
     if (
+      env.NODE_ENV === 'production' &&
+      env.JWT_ACCESS_SECRET === 'change-me-to-a-long-random-string'
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'JWT_ACCESS_SECRET is still the example placeholder',
+      });
+    }
+    if (
+      env.NODE_ENV === 'production' &&
+      (env.DATABASE_URL.includes('payment_app_dev_password') ||
+        env.DATABASE_URL.includes('payment_owner_dev_password'))
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'DATABASE_URL still uses a development database password',
+      });
+    }
+    if (
       env.STORAGE_DRIVER === 's3' &&
       (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY || !env.S3_SECRET_KEY)
     ) {

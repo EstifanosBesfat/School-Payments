@@ -22,6 +22,7 @@
     "db:backup": "node scripts/backup/backup.mjs",
     "db:restore-verify": "node scripts/backup/restore-verify.mjs",
     "test:backup": "node --test scripts/backup/backup.test.mjs",
+    "test:deploy": "node scripts/deploy/recovery-check.mjs",
     "keys:generate": "pnpm --filter @payment/api keys:generate"
   },
   "devDependencies": {

@@ -1,8 +1,9 @@
 import { cookies, headers } from 'next/headers';
 import { redirect, unstable_rethrow } from 'next/navigation';
+import { serverApiUrl } from './server-api-url';
 import { ACCESS_COOKIE, PARENT_COOKIE } from './session';
 
-export const API_URL = process.env.API_URL ?? 'http://localhost:4000';
+export const API_URL = serverApiUrl();
 
 export class ApiError extends Error {
   constructor(
@@ -60,7 +61,7 @@ export async function clientIpHeaders(): Promise<Record<string, string>> {
 }
 
 export function buildUrl(path: string, query?: ApiRequestOptions['query']): string {
-  const url = new URL(path, API_URL);
+  const url = new URL(path, serverApiUrl());
   for (const [key, value] of Object.entries(query ?? {})) {
     if (value !== undefined && value !== null && value !== '')
       url.searchParams.set(key, String(value));

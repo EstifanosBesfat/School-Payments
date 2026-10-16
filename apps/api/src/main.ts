@@ -32,7 +32,8 @@ async function bootstrap(): Promise<void> {
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key', 'Idempotency-Key'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   });
-  app.enableShutdownHooks();
+  // The image runs Node as PID 1. Re-raising SIGTERM after the hooks would be ignored.
+  app.enableShutdownHooks([], { useProcessExit: true });
 
   const swagger = new DocumentBuilder()
     .setTitle('School Payments API')
