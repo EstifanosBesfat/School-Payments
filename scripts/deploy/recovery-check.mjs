@@ -83,15 +83,21 @@ async function removeDisposable() {
 }
 
 async function platformState() {
+  const ids = await spawnText('docker', ['ps', '-aq', '--filter', 'name=payment-platform']);
+  const list = ids.stdout.trim().split(/\s+/).filter(Boolean);
+  if (list.length === 0) return '';
   const result = await spawnText('docker', [
-    'ps',
-    '-a',
-    '--filter',
-    'name=payment-platform',
+    'inspect',
     '--format',
-    '{{.Names}} {{.ID}} {{.Status}}',
+    '{{.Name}} {{.Id}} {{.State.Status}} {{.State.StartedAt}}',
+    ...list,
   ]);
-  return result.stdout.trim();
+  if (result.code !== 0) throw new Error('Could not inspect the developer containers.');
+  return result.stdout
+    .trim()
+    .split('\n')
+    .sort()
+    .join('\n');
 }
 
 async function apiStatus(pathname) {
