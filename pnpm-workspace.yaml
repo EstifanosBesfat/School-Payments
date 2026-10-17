@@ -2,6 +2,12 @@ packages:
   - "apps/*"
   - "packages/*"
 
+# pnpm 11.7.0 aborts a registry download when the whole request exceeds fetchTimeout
+# (AbortSignal.timeout). The 60s default cannot finish next@16.4.0 (43,630,586 bytes)
+# or @next/swc-linux-x64-musl@16.4.0 (34,530,376 bytes) on a slow path. Retries stay finite.
+fetchTimeout: 1200000
+fetchRetries: 3
+
 allowBuilds:
   "@prisma/engines": true
   prisma: true
