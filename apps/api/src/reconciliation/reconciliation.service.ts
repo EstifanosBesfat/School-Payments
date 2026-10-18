@@ -4,7 +4,7 @@ import type { Principal } from '../common/principal';
 import { APP_ENV, type AppEnv } from '../config/config.module';
 import { GatewayRegistry } from '../gateways/gateway.registry';
 import type { GatewayTransactionSummary } from '../gateways/payment-gateway.interface';
-import { PaymentsService } from '../payments/payments.service';
+import { CHECKOUT_RETRY_WINDOW_MS, PaymentsService } from '../payments/payments.service';
 import { PrismaService, type Tx } from '../prisma/prisma.service';
 import { JOBS, QUEUES } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
@@ -51,10 +51,20 @@ export class ReconciliationService implements OnModuleInit {
     }
   }
 
-  /** Re-verifies payments still pending 10+ minutes after checkout (webhook lost, parent closed the tab). */
+  /** Re-verifies payments still pending, and card declines that can still succeed on the same tx_ref. */
   async sweepPending(): Promise<{ queued: number }> {
+    const now = Date.now();
     const pending = await this.prisma.db.payment.findMany({
-      where: { status: 'PENDING', createdAt: { lt: new Date(Date.now() - 10 * MINUTE) } },
+      where: {
+        OR: [
+          { status: 'PENDING', createdAt: { lt: new Date(now - 10 * MINUTE) } },
+          {
+            status: 'FAILED',
+            failureReason: 'gateway_reported_failed',
+            createdAt: { gt: new Date(now - CHECKOUT_RETRY_WINDOW_MS) },
+          },
+        ],
+      },
       select: { txRef: true },
       orderBy: { createdAt: 'asc' },
       take: SWEEP_BATCH,
@@ -166,7 +176,8 @@ export class ReconciliationService implements OnModuleInit {
 
     let checked = 0;
     let settledLate = 0;
-    const successful = seen.filter((tx) => tx.status === 'success' && new Date(tx.createdAt).getTime() >= since);
+    // listTransactions maps Chapa's "success" to "succeeded" before this comparison.
+    const successful = seen.filter((tx) => tx.status === 'succeeded' && new Date(tx.createdAt).getTime() >= since);
     const seenRefs = new Set<string>();
     for (const tx of successful) {
       checked += 1;

@@ -9,10 +9,11 @@ export default async function PayReturnPage({
   searchParams,
 }: {
   params: Promise<{ token: string }>;
-  searchParams: Promise<{ tx?: string }>;
+  searchParams: Promise<{ tx?: string; trx_ref?: string; tx_ref?: string }>;
 }) {
   const { token } = await params;
-  const { tx } = await searchParams;
+  const query = await searchParams;
+  const tx = query.tx ?? query.trx_ref ?? query.tx_ref;
   if (!tx) {
     return (
       <main className="mx-auto max-w-lg px-4 py-16 text-center">

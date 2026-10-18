@@ -18,6 +18,7 @@ export interface PayView {
 }
 
 export interface PayStatus {
+  rechecking?: boolean;
   invoiceStatus: string;
   payment: { txRef: string; status: string; amount: number; method: string | null; payer: string };
   receipt: { id: string; receiptNo: string; verificationCode: string; pdfReady: boolean } | null;

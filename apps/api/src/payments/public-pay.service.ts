@@ -3,6 +3,11 @@ import { maskPhone, shortVerificationCode } from '@payment/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { JOBS, QUEUES, type VerifyPaymentJob } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
+import { shouldRecheckFailedPayment } from './payments.service';
+
+/** Pending checkout is confirmed quickly. A declined card is rechecked on a slower cadence. */
+const PENDING_POLL_BUCKET_MS = 15_000;
+const FAILED_RECHECK_BUCKET_MS = 60_000;
 
 /**
  * Data shown on the public pay page. The pay token in the SMS link is a 256-bit secret, so
@@ -70,7 +75,7 @@ export class PublicPayService {
     };
   }
 
-  /** Return page polling. Pending payments trigger a (deduplicated) server-side verify. */
+  /** Return page polling. Pending and recently declined attempts trigger a server-side verify. */
   async status(payToken: string, txRef: string) {
     const invoice = await this.load(payToken);
     const payment = await this.prisma.db.payment.findFirst({
@@ -78,12 +83,15 @@ export class PublicPayService {
       include: { receipt: { select: { id: true, receiptNo: true, payloadHash: true, pdfKey: true } } },
     });
     if (!payment) throw new NotFoundException('Payment not found');
-    if (payment.status === 'PENDING') {
+    const rechecking = payment.status === 'PENDING' || shouldRecheckFailedPayment(payment);
+    if (rechecking) {
+      const bucketMs = payment.status === 'FAILED' ? FAILED_RECHECK_BUCKET_MS : PENDING_POLL_BUCKET_MS;
       await this.queues.add<VerifyPaymentJob>(QUEUES.payments, JOBS.verifyPayment, { txRef, reason: 'return' }, {
-        jobId: `poll-${txRef}-${Math.floor(Date.now() / 15000)}`,
+        jobId: `poll-${txRef}-${Math.floor(Date.now() / bucketMs)}`,
       });
     }
     return {
+      rechecking,
       invoiceStatus: invoice.status,
       payment: {
         txRef: payment.txRef,

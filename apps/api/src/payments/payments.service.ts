@@ -21,18 +21,35 @@ import { PrismaService, type Tx } from '../prisma/prisma.service';
 import { JOBS, QUEUES, type VerifyPaymentJob } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
 
-const REUSE_CHECKOUT_WINDOW_MS = 30 * 60 * 1000;
+/** Hosted Chapa checkout stays open after a declined card, and the customer retries on the same tx_ref. */
+export const CHECKOUT_RETRY_WINDOW_MS = 30 * 60 * 1000;
+const REUSE_CHECKOUT_WINDOW_MS = CHECKOUT_RETRY_WINDOW_MS;
 const PENDING_EXPIRY_MS = 24 * 3600 * 1000;
+const CARD_RETRY_DELAYS_MS = [45_000, 3 * 60_000, 10 * 60_000];
 
 export type SettlementOutcome =
   | 'unknown_payment'
   | 'already_final'
+  | 'already_failed'
   | 'still_pending'
   | 'succeeded'
   | 'failed'
   | 'review'
   | 'refunded'
-  | 'expired';
+  | 'expired'
+  | 'rejected';
+
+/** A gateway decline can still succeed later on the same checkout. Initialization failures cannot. */
+export function shouldRecheckFailedPayment(
+  payment: { status: string; failureReason: string | null; createdAt: Date },
+  now = Date.now(),
+): boolean {
+  return (
+    payment.status === 'FAILED' &&
+    payment.failureReason === 'gateway_reported_failed' &&
+    now - payment.createdAt.getTime() < CHECKOUT_RETRY_WINDOW_MS
+  );
+}
 
 function splitName(fullName: string): { firstName: string; lastName: string } {
   const parts = fullName.trim().split(/\s+/);
@@ -60,10 +77,10 @@ export class PaymentsService implements OnModuleInit {
     );
   }
 
-  async enqueueVerification(txRef: string, reason: VerifyPaymentJob['reason'], delayMs = 0): Promise<void> {
+  async enqueueVerification(txRef: string, reason: VerifyPaymentJob['reason'], delayMs = 0, jobId?: string): Promise<void> {
     await this.queues.add<VerifyPaymentJob>(QUEUES.payments, JOBS.verifyPayment, { txRef, reason }, {
       delay: delayMs,
-      jobId: delayMs > 0 ? `verify-${txRef}-${Date.now() + delayMs}` : undefined,
+      jobId: jobId ?? (delayMs > 0 ? `verify-${txRef}-${Date.now() + delayMs}` : undefined),
     });
   }
 
@@ -175,6 +192,11 @@ export class PaymentsService implements OnModuleInit {
    * The only path that changes a payment's money state. Always re-queries the gateway, then
    * applies the result inside one transaction with row locks so concurrent webhooks, callbacks
    * and sweeps cannot double-settle.
+   *
+   * A failed card attempt on Chapa's hosted checkout keeps the same tx_ref. The first verify
+   * may report failed, and a later verify of that same reference may report success. That
+   * later success is applied. A failed or pending verify never pays the invoice, and it never
+   * downgrades a payment that already succeeded.
    */
   async verifyAndSettle(txRef: string, reason: VerifyPaymentJob['reason']): Promise<SettlementOutcome> {
     const payment = await this.prisma.db.payment.findUnique({ where: { txRef } });
@@ -194,6 +216,10 @@ export class PaymentsService implements OnModuleInit {
         return 'still_pending';
       }
       throw error;
+    }
+    if (verified.txRef !== payment.txRef) {
+      this.logger.error(`Refusing to settle ${payment.txRef}: verification returned ${verified.txRef}`);
+      return 'rejected';
     }
 
     switch (verified.status) {
@@ -233,7 +259,10 @@ export class PaymentsService implements OnModuleInit {
   ): Promise<SettlementOutcome> {
     const outcome = await this.prisma.tenant(payment.schoolId, async (tx): Promise<SettlementOutcome> => {
       const current = await this.lockPayment(tx, payment.id);
-      if (current.status === 'SUCCEEDED' || current.status === 'REVIEW') return 'already_final';
+      if (current.status === 'SUCCEEDED' || current.status === 'REVIEW' || current.status === 'REFUNDED' || current.status === 'REVERSED') {
+        return 'already_final';
+      }
+      if (current.invoiceId !== payment.invoiceId || current.txRef !== payment.txRef) return 'rejected';
 
       const raw = JSON.parse(JSON.stringify(verified.raw ?? null)) as Prisma.InputJsonValue;
       if (verified.amount !== current.amount || verified.currency !== current.currency) {
@@ -281,6 +310,7 @@ export class PaymentsService implements OnModuleInit {
           method: verified.method,
           gatewayFee,
           platformFee,
+          failureReason: null,
           rawVerifyResponse: raw,
           verifiedAt: now,
           succeededAt: now,
@@ -327,7 +357,7 @@ export class PaymentsService implements OnModuleInit {
   }
 
   private async markFailed(payment: Payment, verified: VerifiedTransaction): Promise<SettlementOutcome> {
-    const changed = await this.prisma.tenant(payment.schoolId, async (tx) => {
+    const outcome = await this.prisma.tenant(payment.schoolId, async (tx): Promise<SettlementOutcome> => {
       const result = await tx.payment.updateMany({
         where: { id: payment.id, status: 'PENDING' },
         data: {
@@ -342,13 +372,33 @@ export class PaymentsService implements OnModuleInit {
           { schoolId: payment.schoolId, actorType: 'gateway', actorId: payment.gateway, action: 'payment.failed', entityType: 'Payment', entityId: payment.id, metadata: { txRef: payment.txRef } },
           tx,
         );
+        return 'failed';
       }
-      return result.count > 0;
+      const current = await tx.payment.findUnique({ where: { id: payment.id }, select: { status: true } });
+      return current?.status === 'FAILED' ? 'already_failed' : 'already_final';
     });
-    if (changed) {
+    if (outcome === 'failed') {
       await this.outbound.emit(payment.schoolId, 'payment.failed', { txRef: payment.txRef, paymentId: payment.id, invoiceId: payment.invoiceId });
     }
-    return changed ? 'failed' : 'already_final';
+    if (outcome === 'failed' || outcome === 'already_failed') {
+      const failureReason = outcome === 'failed' ? 'gateway_reported_failed' : payment.failureReason;
+      if (failureReason === 'gateway_reported_failed') await this.scheduleCardRetryChecks(payment.txRef, payment.createdAt);
+    }
+    return outcome;
+  }
+
+  /**
+   * The failure webhook often arrives before the customer finishes a card retry on the same
+   * checkout. These delayed verifies observe a later success without trusting the webhook body.
+   * Job ids are stable so a repeated failure does not queue a second copy.
+   */
+  private async scheduleCardRetryChecks(txRef: string, createdAt: Date): Promise<void> {
+    const ageMs = Date.now() - createdAt.getTime();
+    if (ageMs >= CHECKOUT_RETRY_WINDOW_MS) return;
+    for (const delayMs of CARD_RETRY_DELAYS_MS) {
+      if (ageMs + delayMs >= CHECKOUT_RETRY_WINDOW_MS) continue;
+      await this.enqueueVerification(txRef, 'sweep', delayMs, `card-retry-${txRef}-${delayMs}`);
+    }
   }
 
   private async settleRefund(payment: Payment, verified: VerifiedTransaction): Promise<SettlementOutcome> {

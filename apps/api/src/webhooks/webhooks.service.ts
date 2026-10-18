@@ -2,10 +2,34 @@ import { Injectable, Logger, type OnModuleInit, UnauthorizedException } from '@n
 import { Prisma } from '@payment/db';
 import type { Job } from 'bullmq';
 import { GatewayRegistry } from '../gateways/gateway.registry';
-import { PaymentsService } from '../payments/payments.service';
+import { PaymentsService, type SettlementOutcome } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JOBS, type ProcessWebhookEventJob, QUEUES } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
+
+/**
+ * The webhook body is only a hint to re-verify. A payload that claims success is not proof of
+ * payment: if Chapa's verify call still says failed or pending, the worker must try again
+ * instead of acknowledging the event as finished.
+ */
+export function gatewayPayloadClaimsSuccess(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  const body = payload as Record<string, unknown>;
+  const status = typeof body.status === 'string' ? body.status.toLowerCase() : '';
+  const eventName = typeof body.event === 'string' ? body.event.toLowerCase() : '';
+  return status === 'success' || status === 'successful' || eventName === 'charge.success' || eventName === 'payment.success';
+}
+
+export class GatewaySuccessUnconfirmedError extends Error {
+  constructor(txRef: string, outcome: SettlementOutcome) {
+    super(`Gateway verification has not confirmed success for ${txRef} (${outcome})`);
+    this.name = 'GatewaySuccessUnconfirmedError';
+  }
+}
+
+function needsAnotherVerification(outcome: SettlementOutcome): boolean {
+  return outcome === 'failed' || outcome === 'already_failed' || outcome === 'still_pending' || outcome === 'expired';
+}
 
 @Injectable()
 export class WebhooksService implements OnModuleInit {
@@ -76,13 +100,21 @@ export class WebhooksService implements OnModuleInit {
 
     try {
       const outcome = await this.payments.verifyAndSettle(event.txRef, 'webhook');
+      if (gatewayPayloadClaimsSuccess(payload) && needsAnotherVerification(outcome)) {
+        throw new GatewaySuccessUnconfirmedError(event.txRef, outcome);
+      }
       await this.prisma.db.webhookEvent.update({
         where: { id: event.id },
         data: {
           status: outcome === 'unknown_payment' ? 'IGNORED' : 'PROCESSED',
           processedAt: new Date(),
           attempts: { increment: 1 },
-          error: outcome === 'unknown_payment' ? 'No payment with this tx_ref' : null,
+          error:
+            outcome === 'unknown_payment'
+              ? 'No payment with this tx_ref'
+              : outcome === 'rejected'
+                ? 'Verification did not match this payment'
+                : null,
         },
       });
     } catch (error) {

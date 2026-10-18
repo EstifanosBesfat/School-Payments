@@ -76,7 +76,7 @@ export default async function PaymentsPage({ searchParams }: { searchParams: Pro
                     </a>
                   ) : null}
                 </Td>
-                <Td>{payment.status === 'PENDING' || payment.status === 'REVIEW' ? <VerifyButton paymentId={payment.id} /> : null}</Td>
+                <Td>{payment.status === 'PENDING' || payment.status === 'REVIEW' || payment.status === 'FAILED' ? <VerifyButton paymentId={payment.id} /> : null}</Td>
               </tr>
             ))}
           </tbody>

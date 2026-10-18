@@ -26,8 +26,10 @@ export function ReturnPoller({ token, txRef }: { token: string; txRef: string })
         setStatus(body);
         setError(null);
         const waiting =
-          body.payment.status === 'PENDING' || (body.payment.status === 'SUCCEEDED' && body.receipt !== null && !body.receipt.pdfReady);
-        if (waiting) timer = setTimeout(poll, 1500);
+          body.rechecking === true ||
+          body.payment.status === 'PENDING' ||
+          (body.payment.status === 'SUCCEEDED' && body.receipt !== null && !body.receipt.pdfReady);
+        if (waiting) timer = setTimeout(poll, body.payment.status === 'FAILED' ? 4000 : 1500);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load payment status');
         if (!cancelled) timer = setTimeout(poll, 2500);
@@ -52,7 +54,7 @@ export function ReturnPoller({ token, txRef }: { token: string; txRef: string })
     );
   }
 
-  if (!status || status.payment.status === 'PENDING') {
+  if (!status || status.payment.status === 'PENDING' || (status.payment.status === 'FAILED' && status.rechecking)) {
     return (
       <Card>
         <CardBody className="space-y-3 py-10 text-center">
