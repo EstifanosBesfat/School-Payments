@@ -97,8 +97,10 @@ model School {
   receiptSeq          Int          @default(0)
   invoiceSeq          Int          @default(0)
   lastReceiptHash     String?
-  chapaSubaccountId   String?
-  settlementEncrypted String?
+  chapaSubaccountId       String?
+  payoutBankCode          String?
+  payoutAccountEncrypted  String?
+  settlementEncrypted     String?
   settlementSummary   String?
   createdAt           DateTime     @default(now())
   updatedAt           DateTime     @updatedAt
@@ -244,6 +246,7 @@ model Invoice {
   paidAmount     Int           @default(0)
   dueDate        DateTime      @db.Date
   payToken       String        @unique
+  billRef        String        @unique
   issuedAt       DateTime?
   paidAt         DateTime?
   cancelledAt    DateTime?
@@ -289,6 +292,9 @@ model Payment {
   payerPhone        String
   payerEmail        String?
   checkoutUrl       String?
+  gatewaySessionId  String?       @unique
+  sessionExpiresAt  DateTime?
+  payerMethod       String?
   gatewayReference  String?       @unique
   method            String?
   gatewayFee        Int?
@@ -355,6 +361,7 @@ model WebhookEvent {
   eventKey       String             @unique
   eventType      String
   txRef          String?
+  sessionId      String?
   signatureValid Boolean
   payload        Json
   status         WebhookEventStatus @default(RECEIVED)
@@ -364,6 +371,7 @@ model WebhookEvent {
   processedAt    DateTime?
 
   @@index([txRef])
+  @@index([sessionId])
 }
 
 model IdempotencyKey {

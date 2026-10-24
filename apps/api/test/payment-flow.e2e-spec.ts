@@ -118,13 +118,14 @@ describe('Payment flow (mock gateway, real Postgres + Redis)', () => {
     expect(replay.headers['idempotent-replayed']).toBe('true');
     expect(replay.body.id).toBe(invoice.body.id);
 
-    const payToken = await owner.invoice.findUniqueOrThrow({ where: { id: invoice.body.id }, select: { payToken: true } }).then((row) => row.payToken);
-    const view = await http.get(`/pay/${payToken}`);
+    const payToken = await owner.invoice.findUniqueOrThrow({ where: { id: invoice.body.id }, select: { payToken: true, billRef: true, number: true } });
+    expect(payToken.billRef).toBe(payToken.number);
+    const view = await http.get(`/pay/${payToken.payToken}`);
     expect(view.status).toBe(200);
     expect(view.body.invoice.balance).toBe(350_000);
     expect(view.body.acceptingPayments).toBe(true);
 
-    const start = await http.post(`/pay/${payToken}/start`).send({ payerName: 'Kebede Alemu', payerPhone: '0911223344', payerEmail: 'parent@e2e.test' });
+    const start = await http.post(`/pay/${payToken.payToken}/start`).send({ payerName: 'Kebede Alemu', payerPhone: '0911223344', payerEmail: 'parent@e2e.test', method: 'telebirr' });
     expect(start.status).toBe(201);
     const { txRef, checkoutUrl } = start.body as { txRef: string; checkoutUrl: string };
     expect(checkoutUrl).toContain(txRef);
@@ -132,14 +133,14 @@ describe('Payment flow (mock gateway, real Postgres + Redis)', () => {
     const unsigned = await http.post('/webhooks/mock').set('Content-Type', 'application/json').send({ tx_ref: txRef, status: 'success' });
     expect(unsigned.status).toBe(401);
 
-    const pendingBeforePay = await http.get(`/pay/${payToken}/status`).query({ tx: txRef });
+    const pendingBeforePay = await http.get(`/pay/${payToken.payToken}/status`).query({ tx: txRef });
     expect(pendingBeforePay.body.payment.status).toBe('PENDING');
 
     const complete = await http.post(`/dev/mock-gateway/${txRef}/complete`).send({ outcome: 'success', method: 'telebirr' });
     expect(complete.status).toBeLessThan(300);
 
     const status = await waitFor(async () => {
-      const response = await http.get(`/pay/${payToken}/status`).query({ tx: txRef });
+      const response = await http.get(`/pay/${payToken.payToken}/status`).query({ tx: txRef });
       return response.body.receipt?.pdfReady ? response.body : null;
     });
     expect(status.payment.status).toBe('SUCCEEDED');
@@ -329,5 +330,121 @@ describe('Payment flow (mock gateway, real Postgres + Redis)', () => {
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }
+  });
+
+  it('keeps one pending payment per invoice and freezes the billing id', async () => {
+    const student = await owner.student.create({
+      data: { schoolId, code: `BILL-${suffix}`, firstName: 'Sara', lastName: 'Bekele', grade: '6' },
+    });
+    const billRef = `${schoolCode}-BILL-${suffix}`;
+    const invoice = await owner.invoice.create({
+      data: {
+        schoolId,
+        studentId: student.id,
+        number: billRef,
+        billRef,
+        totalAmount: 10_000,
+        dueDate: new Date('2026-12-31'),
+        payToken: `pay-${suffix}-bill`,
+      },
+    });
+    await expect(owner.$executeRaw`UPDATE "Invoice" SET "billRef" = ${'changed'} WHERE id = ${invoice.id}`).rejects.toThrow(/immutable|billRef/);
+
+    await owner.payment.create({
+      data: {
+        schoolId,
+        invoiceId: invoice.id,
+        txRef: `PEND-A-${suffix}`,
+        gateway: 'arifpay',
+        amount: 10_000,
+        payerName: 'Sara Bekele',
+        payerPhone: '+251911000099',
+        status: 'PENDING',
+        gatewaySessionId: `SESS-A-${suffix}`,
+        payerMethod: 'telebirr',
+      },
+    });
+    await expect(
+      owner.payment.create({
+        data: {
+          schoolId,
+          invoiceId: invoice.id,
+          txRef: `PEND-B-${suffix}`,
+          gateway: 'arifpay',
+          amount: 10_000,
+          payerName: 'Sara Bekele',
+          payerPhone: '+251911000099',
+          status: 'PENDING',
+        },
+      }),
+    ).rejects.toThrow(/payment_one_pending_per_invoice|Unique constraint/i);
+
+    await owner.payment.update({ where: { txRef: `PEND-A-${suffix}` }, data: { status: 'FAILED' } });
+    const second = await owner.payment.create({
+      data: {
+        schoolId,
+        invoiceId: invoice.id,
+        txRef: `PEND-B-${suffix}`,
+        gateway: 'arifpay',
+        amount: 10_000,
+        payerName: 'Sara Bekele',
+        payerPhone: '+251911000099',
+        status: 'PENDING',
+        payerMethod: 'telebirr',
+      },
+    });
+    expect(second.gatewaySessionId).toBeNull();
+    const alsoWithoutSession = await owner.payment.create({
+      data: {
+        schoolId,
+        invoiceId: invoice.id,
+        txRef: `PEND-C-${suffix}`,
+        gateway: 'mock',
+        amount: 10_000,
+        payerName: 'Sara Bekele',
+        payerPhone: '+251911000099',
+        status: 'FAILED',
+      },
+    });
+    expect(alsoWithoutSession.gatewaySessionId).toBeNull();
+
+    await expect(
+      owner.payment.create({
+        data: {
+          schoolId,
+          invoiceId: invoice.id,
+          txRef: `PEND-D-${suffix}`,
+          gateway: 'mock',
+          amount: 10_000,
+          payerName: 'Sara Bekele',
+          payerPhone: '+251911000099',
+          status: 'FAILED',
+          gatewaySessionId: `SESS-A-${suffix}`,
+        },
+      }),
+    ).rejects.toThrow(/gatewaySessionId|Unique constraint/i);
+
+    await owner.webhookEvent.create({
+      data: {
+        gateway: 'arifpay',
+        eventKey: `evt-${suffix}`,
+        eventType: 'SUCCESS',
+        txRef: `PEND-B-${suffix}`,
+        sessionId: `SESS-B-${suffix}`,
+        signatureValid: true,
+        payload: { nonce: `PEND-B-${suffix}` },
+      },
+    });
+
+    const hidden = await appRole.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('app.school_id', 'some-other-school', true)`;
+      return tx.payment.findUnique({ where: { txRef: `PEND-B-${suffix}` }, select: { gatewaySessionId: true, payerMethod: true } });
+    });
+    expect(hidden).toBeNull();
+    const own = await appRole.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT set_config('app.school_id', ${schoolId}, true)`;
+      return tx.payment.findUnique({ where: { txRef: `PEND-B-${suffix}` }, select: { payerMethod: true } });
+    });
+    expect(own?.payerMethod).toBe('telebirr');
   });
 });

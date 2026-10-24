@@ -197,6 +197,7 @@ export class InvoicesService {
         totalAmount: total,
         dueDate: parseDueDate(draft.dueDate),
         payToken: randomToken(24),
+        billRef: number,
         issuedAt: new Date(),
         createdById: principal.type === 'user' ? principal.userId : null,
         lines: {

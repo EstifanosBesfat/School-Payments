@@ -187,7 +187,7 @@ describe('Rate limits (Redis, production thresholds)', () => {
       .findUniqueOrThrow({ where: { id: invoice.body.id }, select: { payToken: true } })
       .then((row) => row.payToken);
 
-    const startBody = { payerName: 'Parent Kebede', payerPhone: '0911223344' };
+    const startBody = { payerName: 'Parent Kebede', payerPhone: '0911223344', method: 'telebirr' };
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const started = await forwarded(trusted, '192.0.2.10')
         .post(`/pay/${payToken}/start`)
