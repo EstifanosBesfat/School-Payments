@@ -50,6 +50,8 @@ export interface ReceiptMessageData {
   receiptNo: string;
   code: string;
   link: string;
+  /** Parent-facing rail, already stripped of any provider name. */
+  methodLabel?: string;
 }
 
 export const smsTemplates = {
@@ -73,9 +75,10 @@ export const smsTemplates = {
   },
 
   receiptIssued(language: Language, data: ReceiptMessageData): string {
+    const method = data.methodLabel ? (language === 'am' ? ` በ${data.methodLabel}` : ` by ${data.methodLabel}`) : '';
     return language === 'am'
-      ? `${data.school}: የ${data.student} ክፍያ ${birr(data.amount, 'am')} ደርሶናል። ደረሰኝ ${data.receiptNo}፣ ማረጋገጫ ${data.code}። ${data.link}`
-      : `${data.school}: Received ${birr(data.amount, 'en')} for ${data.student}. Receipt ${data.receiptNo}, code ${data.code}. ${data.link}`;
+      ? `${data.school}: የ${data.student} ክፍያ ${birr(data.amount, 'am')}${method} ደርሶናል። ደረሰኝ ${data.receiptNo}፣ ማረጋገጫ ${data.code}። ${data.link}`
+      : `${data.school}: Received ${birr(data.amount, 'en')} for ${data.student}${method}. Receipt ${data.receiptNo}, code ${data.code}. ${data.link}`;
   },
 
   parentOtp(language: Language, code: string): string {
@@ -95,7 +98,7 @@ export const emailTemplates = {
     const text = [
       `Dear ${data.payerName},`,
       '',
-      `${data.school} received ${birr(data.amount, 'en')} for ${data.student} on ${gregorian(data.paidAt)} (${formatEthiopianDate(data.paidAt, 'en')}).`,
+      `${data.school} received ${birr(data.amount, 'en')} for ${data.student}${data.methodLabel ? ` by ${data.methodLabel}` : ''} on ${gregorian(data.paidAt)} (${formatEthiopianDate(data.paidAt, 'en')}).`,
       `Receipt number: ${data.receiptNo}`,
       `Verification code: ${data.code}`,
       '',
@@ -103,7 +106,7 @@ export const emailTemplates = {
     ].join('\n');
     const html = `<!doctype html><html><body style="font-family:Arial,sans-serif;color:#111827">
 <p>Dear ${escapeHtml(data.payerName)},</p>
-<p><strong>${escapeHtml(data.school)}</strong> received <strong>${escapeHtml(birr(data.amount, 'en'))}</strong> for ${escapeHtml(data.student)} on ${escapeHtml(gregorian(data.paidAt))} (${escapeHtml(formatEthiopianDate(data.paidAt, 'en'))}).</p>
+<p><strong>${escapeHtml(data.school)}</strong> received <strong>${escapeHtml(birr(data.amount, 'en'))}</strong> for ${escapeHtml(data.student)}${data.methodLabel ? ` by ${escapeHtml(data.methodLabel)}` : ''} on ${escapeHtml(gregorian(data.paidAt))} (${escapeHtml(formatEthiopianDate(data.paidAt, 'en'))}).</p>
 <table style="border-collapse:collapse"><tr><td style="padding:4px 12px 4px 0;color:#6b7280">Receipt number</td><td><strong>${escapeHtml(data.receiptNo)}</strong></td></tr>
 <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Verification code</td><td><strong>${escapeHtml(data.code)}</strong></td></tr></table>
 <p>The signed PDF receipt is attached. Keep it as proof of payment. You can verify it at any time, even offline, at <a href="${escapeHtml(data.link)}">${escapeHtml(data.link)}</a>.</p>

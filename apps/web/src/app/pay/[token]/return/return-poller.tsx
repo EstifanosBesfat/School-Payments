@@ -9,7 +9,7 @@ import { LinkButton } from '@/components/ui/button';
 import { Card, CardBody } from '@/components/ui/card';
 import type { PayStatus } from '../types';
 
-export function ReturnPoller({ token, txRef }: { token: string; txRef: string }) {
+export function ReturnPoller({ token, txRef, mode = 'return' }: { token: string; txRef: string; mode?: 'return' | 'phone_prompt' }) {
   const [status, setStatus] = useState<PayStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -59,8 +59,12 @@ export function ReturnPoller({ token, txRef }: { token: string; txRef: string })
       <Card>
         <CardBody className="space-y-3 py-10 text-center">
           <LoaderCircle className="mx-auto size-8 animate-spin text-brand-700" aria-hidden />
-          <h1 className="text-lg font-semibold">Confirming your payment…</h1>
-          <p className="text-sm text-gray-600">Do not close this page. We are checking with the payment gateway. · እባክዎ ይጠብቁ።</p>
+          <h1 className="text-lg font-semibold">{mode === 'phone_prompt' ? 'Approve on your phone · በስልክዎ ያጽድቁ' : 'Confirming your payment…'}</h1>
+          <p className="text-sm text-gray-600">
+            {mode === 'phone_prompt'
+              ? 'A request was sent to your phone. Approve it, then stay on this page. · ጥያቄው ወደ ስልክዎ ተልኳል። እባክዎ ያጽድቁ።'
+              : 'Do not close this page. We are checking with the payment gateway. · እባክዎ ይጠብቁ።'}
+          </p>
         </CardBody>
       </Card>
     );

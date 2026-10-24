@@ -1,6 +1,7 @@
 import { formatEatDateTime, formatEtb, formatEthiopianDate, type ReceiptPayload, shortVerificationCode } from '@payment/shared';
 import PDFDocument from 'pdfkit';
 import QRCode from 'qrcode';
+import { payerMethodLabel } from './payer-method-label';
 
 export interface ReceiptPdfInput {
   payload: ReceiptPayload;
@@ -56,7 +57,7 @@ export async function renderReceiptPdf(input: ReceiptPdfInput): Promise<Buffer> 
   field('Grade', payload.student.grade, left, 186, col);
   field('Invoice', payload.invoiceNo, left + col, 186, col);
   field('Paid by', `${payload.payer.name}  ${payload.payer.phone}`, left, 220, col);
-  field('Payment method', `${payload.method} via ${payload.gateway}`, left + col, 220, col);
+  field('Payment method', payerMethodLabel(payload.method) || 'Mobile money', left + col, 220, col);
 
   let y = 266;
   doc.rect(left, y, width, 22).fill('#f3f4f6');
@@ -75,7 +76,7 @@ export async function renderReceiptPdf(input: ReceiptPdfInput): Promise<Buffer> 
   y += 36;
 
   doc.font('Helvetica').fontSize(8.5).fillColor(MUTED);
-  doc.text(`Gateway reference: ${payload.gatewayRef}`, left, y);
+  doc.text(`Payment reference: ${payload.gatewayRef}`, left, y);
   doc.text(`Transaction reference: ${payload.txRef}`, left, y + 12);
   doc.text(`Issued: ${formatEatDateTime(new Date(payload.issuedAt))} EAT`, left, y + 24);
   y += 52;

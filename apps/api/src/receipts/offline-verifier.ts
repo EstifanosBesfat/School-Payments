@@ -118,8 +118,8 @@ async function verify(content) {
       ['Invoice', payload.invoiceNo],
       ['Total paid', money(payload.total)],
       ['Paid at', new Date(payload.paidAt).toLocaleString('en-GB', { timeZone: 'Africa/Addis_Ababa' }) + ' EAT'],
-      ['Method', payload.method + ' via ' + payload.gateway],
-      ['Gateway reference', payload.gatewayRef],
+      ['Method', payload.method === 'telebirr' ? 'Telebirr' : payload.method === 'cbe_birr' ? 'CBE Birr' : payload.method === 'arifpay' || payload.method === 'chapa' || payload.method === 'mock' ? 'Mobile money' : payload.method],
+      ['Payment reference', payload.gatewayRef],
     ];
     for (const [label, value] of rows) { dl.append(el('dt', label), el('dd', value)); }
     const table = el('table');

@@ -4,6 +4,7 @@ import { APP_ENV, type AppEnv } from '../config/config.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { JOBS, QUEUES } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
+import { payerMethodLabel } from '../receipts/payer-method-label';
 import { EmailService } from './email/email.service';
 import { SmsService } from './sms/sms.service';
 import { addisDateOnly, emailTemplates, smsTemplates } from './templates';
@@ -91,7 +92,7 @@ export class NotificationsService implements OnModuleInit {
       where: { id: receiptId },
       include: {
         school: { select: { name: true } },
-        payment: { select: { amount: true, payerName: true, payerPhone: true, payerEmail: true, succeededAt: true } },
+        payment: { select: { amount: true, method: true, payerName: true, payerPhone: true, payerEmail: true, succeededAt: true } },
         invoice: {
           select: {
             student: {
@@ -115,6 +116,7 @@ export class NotificationsService implements OnModuleInit {
       receiptNo: receipt.receiptNo,
       code,
       link: this.verifyLink(receipt.receiptNo, code),
+      methodLabel: payerMethodLabel(receipt.payment.method) || undefined,
     };
     const primary = receipt.invoice.student.guardians[0]?.guardian;
     const phones = new Map<string, Language>();

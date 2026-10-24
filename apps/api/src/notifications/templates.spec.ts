@@ -7,6 +7,29 @@ const sample = {
   link: 'https://pay.example/pay/token',
 };
 
+describe('receipt SMS', () => {
+  it('names the rail and hides the provider', () => {
+    const message = smsTemplates.receiptIssued('en', {
+      ...sample,
+      receiptNo: 'DEMO-1',
+      code: '3FA9-0B1C',
+      methodLabel: 'Telebirr',
+    });
+    const amharic = smsTemplates.receiptIssued('am', {
+      ...sample,
+      receiptNo: 'DEMO-1',
+      code: '3FA9-0B1C',
+      methodLabel: 'CBE Birr',
+    });
+    expect(message).toContain('by Telebirr');
+    expect(amharic).toContain('በCBE Birr');
+    expect(message.toLowerCase()).not.toContain('arifpay');
+    expect(message.toLowerCase()).not.toContain('chapa');
+    expect(amharic.toLowerCase()).not.toContain('arifpay');
+    expect(amharic.toLowerCase()).not.toContain('chapa');
+  });
+});
+
 describe('invoice reminder due dates', () => {
   const dueToday = addisDateOnly();
   const dueYesterday = addisDateOnly(new Date(), -1);
