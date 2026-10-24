@@ -1,0 +1,27 @@
+{
+  "cancelUrl": "https://school.example/pay/token/return",
+  "phone": "251912345678",
+  "email": "fees@school.example",
+  "nonce": "DEMO-ABC",
+  "successUrl": "https://school.example/pay/token/return",
+  "errorUrl": "https://school.example/pay/token/return",
+  "notifyUrl": "https://api.school.example/webhooks/arifpay",
+  "expireDate": "2026-10-24T20:00:00",
+  "items": [
+    {
+      "name": "School fees",
+      "quantity": 1,
+      "price": 100,
+      "description": "DEMO INV-0001"
+    }
+  ],
+  "beneficiaries": [
+    {
+      "accountNumber": "1000000000000",
+      "bank": "AWINETAA",
+      "amount": 100
+    }
+  ],
+  "lang": "EN",
+  "currency": "ETB"
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "paymentType": "CBE",
+    "amount": 1500.5,
+    "transactionId": null,
+    "status": "FAILED",
+    "nonce": "DEMO-ABC",
+    "session": "ED54BDB4D5BF2D"
+  }
+]

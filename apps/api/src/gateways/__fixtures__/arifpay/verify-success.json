@@ -1,0 +1,14 @@
+[
+  {
+    "id": 1,
+    "paymentType": "TELEBIRR_USSD",
+    "amount": 100.0,
+    "transactionId": "BCI6FETYVI",
+    "status": "SUCCESS",
+    "type": "Deposit",
+    "createdAt": "2026-01-15T10:30:00",
+    "nonce": "DEMO-ABC",
+    "user": "merchant@example.com",
+    "session": "ED54BDB4D5BF2D"
+  }
+]

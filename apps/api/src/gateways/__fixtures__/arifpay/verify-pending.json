@@ -1,0 +1,10 @@
+[
+  {
+    "paymentType": "TELEBIRR_USSD",
+    "amount": 100.0,
+    "transactionId": null,
+    "status": "PENDING",
+    "nonce": "DEMO-ABC",
+    "session": "ED54BDB4D5BF2D"
+  }
+]

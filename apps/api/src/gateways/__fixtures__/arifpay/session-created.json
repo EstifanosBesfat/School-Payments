@@ -1,0 +1,10 @@
+{
+  "error": false,
+  "msg": "No Errors",
+  "data": {
+    "sessionId": "ED54BDB4D5BF2D",
+    "paymentUrl": "https://checkout.arifpay.org/checkout/ED54BDB4D5BF2D",
+    "cancelUrl": "https://gateway.arifpay.org/v0/checkout/session/cancelED54BDB4D5BF2D",
+    "totalAmount": 100.0
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "uuid": "ED54BDB4D5BF2D",
+  "sessionId": "ED54BDB4D5BF2D",
+  "nonce": "DEMO-ABC",
+  "phone": "251911111111",
+  "paymentMethod": "CBE",
+  "totalAmount": 1500.5,
+  "transactionStatus": "FAILED",
+  "transaction": {
+    "transactionId": null,
+    "transactionStatus": "FAILED"
+  }
+}

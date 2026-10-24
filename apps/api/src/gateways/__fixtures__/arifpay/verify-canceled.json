@@ -1,0 +1,10 @@
+[
+  {
+    "paymentType": "TELEBIRR_USSD",
+    "amount": 100.0,
+    "transactionId": null,
+    "status": "CANCELED",
+    "nonce": "DEMO-ABC",
+    "session": "ED54BDB4D5BF2D"
+  }
+]

@@ -1,0 +1,7 @@
+{
+  "error": true,
+  "msg": "Validation Error",
+  "data": {
+    "phone": "must match 251XXXXXXXXX"
+  }
+}

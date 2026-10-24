@@ -1,0 +1,13 @@
+{
+  "uuid": "ED54BDB4D5BF2D",
+  "sessionId": "ED54BDB4D5BF2D",
+  "nonce": "DEMO-ABC",
+  "phone": "251911111111",
+  "paymentMethod": "TELEBIRR_USSD",
+  "totalAmount": 100,
+  "transactionStatus": "SUCCESS",
+  "transaction": {
+    "transactionId": "BCI6FETYVI",
+    "transactionStatus": "SUCCESS"
+  }
+}

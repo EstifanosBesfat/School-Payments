@@ -1,0 +1,13 @@
+{
+  "error": false,
+  "msg": "Success",
+  "data": {
+    "sessionId": "ED54BDB4D5BF2D",
+    "transaction": {
+      "transactionStatus": "PENDING"
+    },
+    "otp": null,
+    "url": null,
+    "page": null
+  }
+}
