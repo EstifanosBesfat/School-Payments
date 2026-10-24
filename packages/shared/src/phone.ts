@@ -36,10 +36,15 @@ export function toLocalPhone(e164: string): string {
   return `0${e164.slice(4)}`;
 }
 
-/** +251912345678 -> 251912345678 (GeezSMS format). */
+/** +251912345678 -> 251912345678 (GeezSMS and ArifPay direct-pay format). */
 export function toInternationalDigits(e164: string): string {
   if (!E164_PATTERN.test(e164)) throw new Error('Expected E.164 Ethiopian phone number');
   return e164.slice(1);
+}
+
+/** Telebirr wallets are Ethio Telecom numbers (+2519…). Safaricom (+2517…) is not a Telebirr number. */
+export function isTelebirrPhone(e164: string): boolean {
+  return /^\+2519\d{8}$/.test(e164);
 }
 
 /** +251912345678 -> +2519****5678 (safe for logs and receipts). */

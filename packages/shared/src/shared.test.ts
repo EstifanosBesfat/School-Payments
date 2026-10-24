@@ -4,7 +4,9 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { bytesToBase64Url, canonicalJson, utf8Encode } from './encoding';
 import { gregorianToEthiopian } from './ethiopian-calendar';
 import { etbStringToSantim, formatEtb, santimToEtbString } from './money';
-import { maskPhone, normalizeEthiopianPhone, toLocalPhone } from './phone';
+import { PAYER_METHODS } from './constants';
+import { isTelebirrPhone, maskPhone, normalizeEthiopianPhone, toInternationalDigits, toLocalPhone } from './phone';
+import { startPaymentSchema } from './schemas';
 import {
   canonicalReceiptPayload,
   decodeReceiptQr,
@@ -28,8 +30,52 @@ test('Ethiopian phone numbers normalize to E.164', () => {
   assert.equal(normalizeEthiopianPhone('+251 712 345 678'), '+251712345678');
   assert.equal(normalizeEthiopianPhone('251912345678'), '+251912345678');
   assert.equal(toLocalPhone('+251912345678'), '0912345678');
+  assert.equal(toInternationalDigits('+251912345678'), '251912345678');
+  assert.equal(toInternationalDigits('+251712345678'), '251712345678');
   assert.equal(maskPhone('+251912345678'), '+2519****5678');
+  assert.equal(isTelebirrPhone('+251912345678'), true);
+  assert.equal(isTelebirrPhone('+251712345678'), false);
   assert.throws(() => normalizeEthiopianPhone('0112345678'));
+  assert.throws(() => normalizeEthiopianPhone('091234567'));
+  assert.throws(() => normalizeEthiopianPhone('09123456789'));
+  assert.throws(() => normalizeEthiopianPhone('09abcdefgh'));
+  assert.throws(() => toInternationalDigits('0912345678'));
+});
+
+test('a parent payment chooses Telebirr or CBE Birr', () => {
+  assert.deepEqual([...PAYER_METHODS], ['telebirr', 'cbe_birr']);
+  const base = { payerName: 'Abebe Kebede', payerPhone: '0912345678' };
+
+  const telebirr = startPaymentSchema.safeParse({ ...base, method: 'telebirr' });
+  assert.equal(telebirr.success, true);
+  if (telebirr.success) {
+    assert.equal(telebirr.data.payerPhone, '+251912345678');
+    assert.equal(telebirr.data.method, 'telebirr');
+    assert.equal(telebirr.data.payerEmail, undefined);
+  }
+
+  const withEmail = startPaymentSchema.safeParse({ ...base, method: 'cbe_birr', payerEmail: 'parent@example.com' });
+  assert.equal(withEmail.success, true);
+
+  const safaricomOnCbe = startPaymentSchema.safeParse({ ...base, payerPhone: '0712345678', method: 'cbe_birr' });
+  assert.equal(safaricomOnCbe.success, true);
+  if (safaricomOnCbe.success) assert.equal(safaricomOnCbe.data.payerPhone, '+251712345678');
+
+  const international = startPaymentSchema.safeParse({ ...base, payerPhone: '+251912345678', method: 'telebirr' });
+  assert.equal(international.success, true);
+  const digitsOnly = startPaymentSchema.safeParse({ ...base, payerPhone: '251912345678', method: 'telebirr' });
+  assert.equal(digitsOnly.success, true);
+
+  const safaricomOnTelebirr = startPaymentSchema.safeParse({ ...base, payerPhone: '0712345678', method: 'telebirr' });
+  assert.equal(safaricomOnTelebirr.success, false);
+  if (!safaricomOnTelebirr.success) {
+    assert.ok(safaricomOnTelebirr.error.issues.some((issue) => issue.path.join('.') === 'payerPhone'));
+  }
+
+  for (const method of [undefined, '', 'Telebirr', 'TELEBIRR', 'arifpay', 'chapa', ['telebirr']]) {
+    const parsed = startPaymentSchema.safeParse({ ...base, method });
+    assert.equal(parsed.success, false, `method ${JSON.stringify(method)} must be rejected`);
+  }
 });
 
 test('Gregorian to Ethiopian calendar conversion', () => {

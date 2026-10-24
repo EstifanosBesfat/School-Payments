@@ -10,6 +10,10 @@ export type InvoiceStatus = (typeof INVOICE_STATUSES)[number];
 export const PAYMENT_STATUSES = ['PENDING', 'SUCCEEDED', 'FAILED', 'REVIEW', 'REFUNDED', 'REVERSED'] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 
+/** Methods a parent can choose. The payment provider stays off this list. */
+export const PAYER_METHODS = ['telebirr', 'cbe_birr'] as const;
+export type PayerMethod = (typeof PAYER_METHODS)[number];
+
 export const API_KEY_SCOPES = [
   'students:read',
   'students:write',

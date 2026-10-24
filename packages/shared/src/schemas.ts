@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { API_KEY_SCOPES, LANGUAGES, OUTBOUND_WEBHOOK_EVENTS } from './constants';
-import { isEthiopianPhone, normalizeEthiopianPhone } from './phone';
+import { API_KEY_SCOPES, LANGUAGES, OUTBOUND_WEBHOOK_EVENTS, PAYER_METHODS, type PayerMethod } from './constants';
+import { isEthiopianPhone, isTelebirrPhone, normalizeEthiopianPhone } from './phone';
 
 const MAX_SANTIM = 100_000_000_00;
 
@@ -131,12 +131,28 @@ export const bulkInvoiceSchema = z.object({
 });
 export type BulkInvoiceInput = z.infer<typeof bulkInvoiceSchema>;
 
-export const startPaymentSchema = z.object({
-  payerName: z.string().trim().min(2).max(200),
-  payerPhone: phoneSchema,
-  payerEmail: z.email().optional(),
-});
+export const startPaymentSchema = z
+  .object({
+    payerName: z.string().trim().min(2).max(200),
+    payerPhone: phoneSchema,
+    payerEmail: z.email().optional(),
+    method: z.enum(PAYER_METHODS),
+  })
+  .superRefine((value, ctx) => {
+    if (value.method === 'telebirr' && !isTelebirrPhone(value.payerPhone)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['payerPhone'],
+        message: 'Telebirr needs an Ethio Telecom number starting with 09',
+      });
+    }
+  });
 export type StartPaymentInput = z.infer<typeof startPaymentSchema>;
+
+/** What the pay page receives after a parent submits. Redirect is the hosted-checkout path; phone_prompt stays on our page. */
+export type StartPaymentResult =
+  | { kind: 'phone_prompt'; txRef: string; method: PayerMethod; expiresAt: string }
+  | { kind: 'redirect'; txRef: string; checkoutUrl: string };
 
 export const createApiKeySchema = z.object({
   name: z.string().trim().min(2).max(100),
