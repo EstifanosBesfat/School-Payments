@@ -3,7 +3,7 @@ import type { IssueStatus, Prisma } from '@payment/db';
 import type { Principal } from '../common/principal';
 import { APP_ENV, type AppEnv } from '../config/config.module';
 import { GatewayRegistry } from '../gateways/gateway.registry';
-import type { GatewayTransactionSummary } from '../gateways/payment-gateway.interface';
+import { GatewayError, type GatewayTransactionSummary, type VerifiedTransaction } from '../gateways/payment-gateway.interface';
 import { PaymentLockService } from '../payments/payment-lock.service';
 import { CHECKOUT_RETRY_WINDOW_MS, PaymentsService } from '../payments/payments.service';
 import { PrismaService, type Tx } from '../prisma/prisma.service';
@@ -11,6 +11,7 @@ import { JOBS, QUEUES } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
 import { ReceiptsService } from '../receipts/receipts.service';
 import { AuditService } from '../audit/audit.service';
+import { gatewayPayloadClaimsSuccess } from '../webhooks/webhooks.service';
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -193,6 +194,9 @@ export class ReconciliationService implements OnModuleInit {
         }
       }
     } catch (error) {
+      if (error instanceof GatewayError && !error.retryable && gateway.verifySession) {
+        return this.compareBySession(gateway, openIssue);
+      }
       this.logger.warn(`Could not list ${gatewayName} transactions: ${(error as Error).message}`);
       await openIssue({ kind: 'gateway_unreachable', gatewayReference: `${gatewayName}-${new Date().toISOString().slice(0, 10)}`, details: { gateway: gatewayName, error: (error as Error).message } });
       return { checked: 0, settledLate: 0 };
@@ -236,6 +240,103 @@ export class ReconciliationService implements OnModuleInit {
         if (!seenRefs.has(payment.txRef)) {
           await openIssue({ schoolId: payment.schoolId, kind: 'missing_at_gateway', txRef: payment.txRef, gatewayReference: payment.gatewayReference, details: { amount: payment.amount, gateway: gatewayName } });
         }
+      }
+    }
+    return { checked, settledLate };
+  }
+
+  /**
+   * ArifPay has no transaction list. Each local session is verified, and a success notify whose
+   * nonce has no payment row is verified too. The notify body never settles the invoice.
+   */
+  private async compareBySession(
+    gateway: { name: string; verifySession?: (sessionId: string, txRef: string) => Promise<VerifiedTransaction> },
+    openIssue: (data: { schoolId?: string | null; kind: string; txRef?: string | null; gatewayReference?: string | null; details: Prisma.InputJsonObject }) => Promise<void>,
+  ): Promise<{ checked: number; settledLate: number }> {
+    if (!gateway.verifySession) return { checked: 0, settledLate: 0 };
+    const since = Date.now() - GATEWAY_WINDOW_MS;
+    const settledBefore = new Date(Date.now() - HOUR);
+    const local = await this.prisma.db.payment.findMany({
+      where: {
+        gateway: gateway.name,
+        gatewaySessionId: { not: null },
+        OR: [
+          { status: 'SUCCEEDED', succeededAt: { gte: new Date(since + HOUR), lt: settledBefore } },
+          { status: { in: ['PENDING', 'FAILED'] }, createdAt: { gte: new Date(since), lt: settledBefore } },
+        ],
+      },
+    });
+
+    let checked = 0;
+    let settledLate = 0;
+    const seenTx = new Set<string>();
+    for (const payment of local) {
+      if (!payment.gatewaySessionId) continue;
+      seenTx.add(payment.txRef);
+      checked += 1;
+      let verified: VerifiedTransaction;
+      try {
+        verified = await gateway.verifySession(payment.gatewaySessionId, payment.txRef);
+      } catch (error) {
+        this.logger.warn(`Could not verify ${gateway.name} session for ${payment.txRef}: ${(error as Error).message}`);
+        continue;
+      }
+      let current = payment;
+      if ((payment.status === 'PENDING' || payment.status === 'FAILED') && verified.status === 'succeeded') {
+        const outcome = await this.payments.verifyAndSettle(payment.txRef, 'sweep').catch(() => 'error' as const);
+        if (outcome === 'succeeded') settledLate += 1;
+        current = await this.prisma.db.payment.findUniqueOrThrow({ where: { txRef: payment.txRef } });
+      }
+      if (current.status === 'SUCCEEDED' || current.status === 'REFUNDED' || current.status === 'REVERSED') {
+        if (verified.status !== 'succeeded' && verified.status !== 'refunded' && verified.status !== 'reversed') {
+          await openIssue({
+            schoolId: current.schoolId,
+            kind: 'missing_at_gateway',
+            txRef: current.txRef,
+            gatewayReference: current.gatewayReference,
+            details: { amount: current.amount, gateway: gateway.name, verifiedStatus: verified.status },
+          });
+        } else if (current.amount !== verified.amount || current.currency !== verified.currency) {
+          await openIssue({
+            schoolId: current.schoolId,
+            kind: 'amount_mismatch',
+            txRef: current.txRef,
+            gatewayReference: verified.gatewayReference ?? current.gatewayReference,
+            details: { gatewayAmount: verified.amount, localAmount: current.amount, gatewayCurrency: verified.currency },
+          });
+        }
+      } else if (verified.status === 'succeeded') {
+        await openIssue({
+          schoolId: current.schoolId,
+          kind: 'status_mismatch',
+          txRef: current.txRef,
+          gatewayReference: verified.gatewayReference,
+          details: { gatewayStatus: verified.status, localStatus: current.status, amount: verified.amount },
+        });
+      }
+    }
+
+    const notifies = await this.prisma.db.webhookEvent.findMany({
+      where: { gateway: gateway.name, signatureValid: true, txRef: { not: null }, receivedAt: { gte: new Date(since) } },
+    });
+    for (const event of notifies) {
+      if (!event.txRef || seenTx.has(event.txRef) || !gatewayPayloadClaimsSuccess(event.payload)) continue;
+      const payment = await this.prisma.db.payment.findUnique({ where: { txRef: event.txRef } });
+      if (payment) continue;
+      seenTx.add(event.txRef);
+      if (!event.sessionId) continue;
+      checked += 1;
+      try {
+        const verified = await gateway.verifySession(event.sessionId, event.txRef);
+        if (verified.status !== 'succeeded') continue;
+        await openIssue({
+          kind: 'gateway_tx_unknown',
+          txRef: event.txRef,
+          gatewayReference: verified.gatewayReference,
+          details: { gateway: gateway.name, amount: verified.amount, currency: verified.currency, sessionId: event.sessionId },
+        });
+      } catch (error) {
+        this.logger.warn(`Could not verify ${gateway.name} notify ${event.txRef}: ${(error as Error).message}`);
       }
     }
     return { checked, settledLate };
