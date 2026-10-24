@@ -3,6 +3,8 @@ import { hmacSha256Hex } from '../common/crypto.util';
 import { ChapaGateway } from './chapa.gateway';
 import type {
   CreateSubaccountRequest,
+  DirectPayRequest,
+  DirectPayResult,
   GatewayBank,
   GatewayTransactionSummary,
   InitializePaymentRequest,
@@ -64,6 +66,27 @@ export class MockGateway extends ChapaGateway {
       createdAt: new Date().toISOString(),
     });
     return { checkoutUrl: `${this.options.webUrl}/dev/checkout/${encodeURIComponent(request.txRef)}` };
+  }
+
+  async directPay(request: DirectPayRequest): Promise<DirectPayResult> {
+    await this.save({
+      txRef: request.txRef,
+      amount: request.amount,
+      currency: request.currency,
+      status: 'pending',
+      method: request.method,
+      returnUrl: request.returnUrl,
+      title: request.title,
+      description: request.description,
+      customerName: 'Parent',
+      createdAt: new Date().toISOString(),
+    });
+    return {
+      sessionId: `mock-${request.txRef}`,
+      expiresAt: request.expiresAt.toISOString(),
+      alreadySucceeded: false,
+      alreadyFailed: false,
+    };
   }
 
   override async verify(txRef: string): Promise<VerifiedTransaction> {

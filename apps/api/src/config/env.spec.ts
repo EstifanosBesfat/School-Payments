@@ -78,4 +78,27 @@ describe('loadEnv', () => {
       /mock gateway/,
     );
   });
+
+  it('requires an ArifPay key and refuses sandbox mode in production', () => {
+    expect(() => loadEnv(environment({ PAYMENT_GATEWAY: 'arifpay' }))).toThrow(/ARIFPAY_API_KEY/);
+    const loaded = loadEnv(
+      environment({
+        PAYMENT_GATEWAY: 'arifpay',
+        ARIFPAY_API_KEY: 'sandbox-key-not-a-real-secret',
+        ARIFPAY_SANDBOX: 'true',
+      }),
+    );
+    expect(loaded.ARIFPAY_SANDBOX).toBe(true);
+    expect(loaded.ARIFPAY_BASE_URL).toBe('https://gateway.arifpay.org');
+    expect(() =>
+      loadEnv(
+        environment({
+          NODE_ENV: 'production',
+          PAYMENT_GATEWAY: 'arifpay',
+          ARIFPAY_API_KEY: 'live-key-not-a-real-secret',
+          ARIFPAY_SANDBOX: 'true',
+        }),
+      ),
+    ).toThrow(/ARIFPAY_SANDBOX/);
+  });
 });

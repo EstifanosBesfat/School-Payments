@@ -42,10 +42,17 @@ const envSchema = z
     RECEIPT_SIGNING_PUBLIC_KEY: z.string().min(1),
     RECEIPT_ADDITIONAL_PUBLIC_KEYS: optionalString,
 
-    PAYMENT_GATEWAY: z.enum(['chapa', 'mock']).default('mock'),
+    PAYMENT_GATEWAY: z.enum(['chapa', 'mock', 'arifpay']).default('mock'),
     CHAPA_BASE_URL: z.url().default('https://api.chapa.co/v1'),
     CHAPA_SECRET_KEY: optionalString,
     CHAPA_WEBHOOK_SECRET: optionalString,
+    ARIFPAY_BASE_URL: z.url().default('https://gateway.arifpay.org'),
+    ARIFPAY_API_KEY: optionalString,
+    ARIFPAY_SANDBOX: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    ARIFPAY_FALLBACK_EMAIL: optionalString,
     PLATFORM_FEE_TYPE: z.enum(['percentage', 'flat']).default('percentage'),
     PLATFORM_FEE_VALUE: z.coerce.number().min(0).default(0),
 
@@ -80,6 +87,15 @@ const envSchema = z
         code: 'custom',
         message: 'CHAPA_SECRET_KEY and CHAPA_WEBHOOK_SECRET are required for PAYMENT_GATEWAY=chapa',
       });
+    }
+    if (env.PAYMENT_GATEWAY === 'arifpay' && !env.ARIFPAY_API_KEY) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'ARIFPAY_API_KEY is required for PAYMENT_GATEWAY=arifpay',
+      });
+    }
+    if (env.NODE_ENV === 'production' && env.ARIFPAY_SANDBOX) {
+      ctx.addIssue({ code: 'custom', message: 'ARIFPAY_SANDBOX cannot be used in production' });
     }
     if (env.NODE_ENV === 'production' && env.PAYMENT_GATEWAY === 'mock') {
       ctx.addIssue({ code: 'custom', message: 'The mock gateway cannot be used in production' });

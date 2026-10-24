@@ -29,6 +29,38 @@ export interface InitializePaymentResult {
   checkoutUrl: string;
 }
 
+export type PayerRail = 'telebirr' | 'cbe_birr';
+
+export interface DirectPayBeneficiary {
+  accountNumber: string;
+  bank: string;
+  /** Santim. The adapter converts this to ETB at the request boundary. */
+  amount: number;
+}
+
+export interface DirectPayRequest {
+  txRef: string;
+  amount: number;
+  currency: 'ETB';
+  method: PayerRail;
+  /** E.164. Converted to 251… inside the adapter. */
+  phone: string;
+  email: string;
+  notifyUrl: string;
+  returnUrl: string;
+  title: string;
+  description: string;
+  expiresAt: Date;
+  beneficiary?: DirectPayBeneficiary;
+}
+
+export interface DirectPayResult {
+  sessionId: string;
+  expiresAt: string;
+  alreadySucceeded: boolean;
+  alreadyFailed: boolean;
+}
+
 export type VerifiedStatus = 'succeeded' | 'failed' | 'pending' | 'refunded' | 'reversed';
 
 export interface VerifiedTransaction {
@@ -49,6 +81,7 @@ export interface ParsedWebhook {
   eventKey: string;
   eventType: string;
   txRef: string | null;
+  sessionId?: string | null;
   payload: unknown;
 }
 
@@ -82,8 +115,12 @@ export interface GatewayTransactionSummary {
 export interface PaymentGateway {
   readonly name: string;
   initialize(request: InitializePaymentRequest): Promise<InitializePaymentResult>;
+  /** Phone prompt for a single rail. The parent never leaves our site. */
+  directPay?(request: DirectPayRequest): Promise<DirectPayResult>;
   /** Authoritative server-to-server status lookup. The only thing allowed to confirm a payment. */
   verify(txRef: string): Promise<VerifiedTransaction>;
+  /** Verify when the provider keys transactions by its own session id rather than our nonce. */
+  verifySession?(sessionId: string, txRef: string): Promise<VerifiedTransaction>;
   parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): ParsedWebhook;
   createSubaccount(request: CreateSubaccountRequest): Promise<{ subaccountId: string }>;
   listBanks(): Promise<GatewayBank[]>;

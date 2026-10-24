@@ -2,6 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { APP_ENV, type AppEnv } from '../config/config.module';
 import { QueueService } from '../queue/queue.service';
 import { ChapaGateway } from './chapa.gateway';
+import { ArifPayGateway } from './arifpay.gateway';
 import { MockGateway } from './mock.gateway';
 import type { PaymentGateway } from './payment-gateway.interface';
 
@@ -18,6 +19,16 @@ export class GatewayRegistry {
           baseUrl: env.CHAPA_BASE_URL,
           secretKey: env.CHAPA_SECRET_KEY,
           webhookSecret: env.CHAPA_WEBHOOK_SECRET,
+        }),
+      );
+    }
+    if (env.ARIFPAY_API_KEY) {
+      this.gateways.set(
+        'arifpay',
+        new ArifPayGateway({
+          baseUrl: env.ARIFPAY_BASE_URL,
+          apiKey: env.ARIFPAY_API_KEY,
+          sandbox: env.ARIFPAY_SANDBOX,
         }),
       );
     }
