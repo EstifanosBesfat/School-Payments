@@ -11,6 +11,9 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   agentRules: false,
+  experimental: {
+    agentUpgrade: 'security',
+  },
   // Docker builds set NEXT_STANDALONE=1. Local `next start` does not support standalone output.
   ...(process.env.NEXT_STANDALONE === '1'
     ? { output: 'standalone' as const, outputFileTracingRoot: path.join(__dirname, '../..') }
