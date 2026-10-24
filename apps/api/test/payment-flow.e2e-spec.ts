@@ -127,7 +127,8 @@ describe('Payment flow (mock gateway, real Postgres + Redis)', () => {
 
     const start = await http.post(`/pay/${payToken.payToken}/start`).send({ payerName: 'Kebede Alemu', payerPhone: '0911223344', payerEmail: 'parent@e2e.test', method: 'telebirr' });
     expect(start.status).toBe(201);
-    const { txRef, checkoutUrl } = start.body as { txRef: string; checkoutUrl: string };
+    const { kind, txRef, checkoutUrl } = start.body as { kind: string; txRef: string; checkoutUrl: string };
+    expect(kind).toBe('redirect');
     expect(checkoutUrl).toContain(txRef);
 
     const unsigned = await http.post('/webhooks/mock').set('Content-Type', 'application/json').send({ tx_ref: txRef, status: 'success' });

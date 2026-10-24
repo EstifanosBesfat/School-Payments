@@ -8,13 +8,13 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { Prisma, type Payment } from '@payment/db';
-import type { StartPaymentInput } from '@payment/shared';
+import type { PayerMethod, StartPaymentInput, StartPaymentResult } from '@payment/shared';
 import type { Job } from 'bullmq';
 import { AuditService } from '../audit/audit.service';
-import { randomReference } from '../common/crypto.util';
+import { randomReference, SecretBox } from '../common/crypto.util';
 import { APP_ENV, type AppEnv } from '../config/config.module';
 import { GatewayRegistry } from '../gateways/gateway.registry';
-import { GatewayError, type VerifiedTransaction } from '../gateways/payment-gateway.interface';
+import { GatewayError, type DirectPayBeneficiary, type VerifiedTransaction } from '../gateways/payment-gateway.interface';
 import { OutboundWebhooksService } from '../integrations/outbound-webhooks.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { PrismaService, type Tx } from '../prisma/prisma.service';
@@ -24,8 +24,23 @@ import { QueueService } from '../queue/queue.service';
 /** Hosted Chapa checkout stays open after a declined card, and the customer retries on the same tx_ref. */
 export const CHECKOUT_RETRY_WINDOW_MS = 30 * 60 * 1000;
 const REUSE_CHECKOUT_WINDOW_MS = CHECKOUT_RETRY_WINDOW_MS;
+const PHONE_PROMPT_WINDOW_MS = 30 * 60 * 1000;
+const PHONE_PROMPT_UNAVAILABLE = 'We could not send the request to your phone. Please try again in a few minutes.';
 const PENDING_EXPIRY_MS = 24 * 3600 * 1000;
 const CARD_RETRY_DELAYS_MS = [45_000, 3 * 60_000, 10 * 60_000];
+
+type PayableInvoice = Prisma.InvoiceGetPayload<{ include: { school: true; student: true; lines: true } }>;
+
+function isPendingInvoiceConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false;
+  const target = error.meta?.['target'];
+  const label = Array.isArray(target) ? target.map(String).join(' ') : String(target ?? '');
+  return label.includes('payment_one_pending_per_invoice') || error.message.includes('payment_one_pending_per_invoice');
+}
+
+function payerMethodOf(value: string | null | undefined): PayerMethod {
+  return value === 'cbe_birr' ? 'cbe_birr' : 'telebirr';
+}
 
 export type SettlementOutcome =
   | 'unknown_payment'
@@ -69,6 +84,7 @@ export class PaymentsService implements OnModuleInit {
     private readonly audit: AuditService,
     private readonly queues: QueueService,
     private readonly outbound: OutboundWebhooksService,
+    private readonly secrets: SecretBox,
   ) {}
 
   onModuleInit(): void {
@@ -90,8 +106,8 @@ export class PaymentsService implements OnModuleInit {
     return Math.round(amount * this.env.PLATFORM_FEE_VALUE);
   }
 
-  /** Public pay page: creates (or reuses) a payment attempt and returns the gateway checkout URL. */
-  async start(payToken: string, input: StartPaymentInput, ip?: string): Promise<{ checkoutUrl: string; txRef: string }> {
+  /** Public pay page: creates (or reuses) a payment attempt and returns a phone prompt or a hosted checkout. */
+  async start(payToken: string, input: StartPaymentInput, ip?: string): Promise<StartPaymentResult> {
     const invoice = await this.prisma.db.invoice.findUnique({
       where: { payToken },
       include: { school: true, student: true, lines: { orderBy: { position: 'asc' } } },
@@ -105,6 +121,9 @@ export class PaymentsService implements OnModuleInit {
     if (amount <= 0) throw new BadRequestException('Nothing left to pay on this invoice');
 
     const gateway = this.gateways.default();
+    if (gateway.name === 'arifpay') {
+      return this.startPhonePrompt(payToken, invoice, input, amount, ip);
+    }
     if (gateway.name === 'chapa' && !invoice.school.chapaSubaccountId) {
       throw new BadRequestException('This school has not finished its payout setup');
     }
@@ -121,7 +140,7 @@ export class PaymentsService implements OnModuleInit {
       },
       orderBy: { createdAt: 'desc' },
     });
-    if (reusable?.checkoutUrl) return { checkoutUrl: reusable.checkoutUrl, txRef: reusable.txRef };
+    if (reusable?.checkoutUrl) return { kind: 'redirect', txRef: reusable.txRef, checkoutUrl: reusable.checkoutUrl };
 
     const txRef = `${invoice.school.code}-${randomReference(14)}`;
     const payment = await this.prisma.tenant(invoice.schoolId, async (tx) => {
@@ -177,7 +196,7 @@ export class PaymentsService implements OnModuleInit {
         tx.payment.update({ where: { id: payment.id }, data: { checkoutUrl: result.checkoutUrl } }),
       );
       await this.enqueueVerification(txRef, 'sweep', 15 * 60 * 1000);
-      return { checkoutUrl: result.checkoutUrl, txRef };
+      return { kind: 'redirect', txRef, checkoutUrl: result.checkoutUrl };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`Gateway initialize failed for ${txRef}: ${message}`);
@@ -185,6 +204,207 @@ export class PaymentsService implements OnModuleInit {
         tx.payment.update({ where: { id: payment.id }, data: { status: 'FAILED', failureReason: `initialize_failed: ${message.slice(0, 300)}` } }),
       );
       throw new BadGatewayException('The payment provider is unavailable. Please try again in a few minutes.');
+    }
+  }
+
+  /**
+   * Telebirr and CBE Birr stay on our page. One invoice has one open attempt. A repeat of the
+   * same amount and method re-sends the phone prompt on that nonce. A method change or an
+   * expired session is verified first, and a paid result is settled instead of replaced.
+   */
+  private async startPhonePrompt(
+    payToken: string,
+    invoice: PayableInvoice,
+    input: StartPaymentInput,
+    amount: number,
+    ip?: string,
+  ): Promise<StartPaymentResult> {
+    if (!invoice.school.payoutBankCode?.trim() || !invoice.school.payoutAccountEncrypted?.trim()) {
+      throw new BadRequestException('This school has not finished its payout setup');
+    }
+
+    const pending = await this.prisma.db.payment.findFirst({
+      where: { invoiceId: invoice.id, status: 'PENDING' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (pending) {
+      const expired = pending.sessionExpiresAt != null && pending.sessionExpiresAt.getTime() <= Date.now();
+      const sameAttempt = !expired && pending.amount === amount && pending.payerMethod === input.method;
+      if (sameAttempt) {
+        return this.dispatchPhonePrompt(payToken, invoice, pending, input);
+      }
+      const kept = await this.closeOpenAttempt(pending, expired ? 'expired' : pending.payerMethod !== input.method ? 'superseded_by_method_change' : 'superseded_by_amount_change');
+      if (kept) return this.phonePromptView(kept);
+    }
+
+    return this.createPhoneAttempt(payToken, invoice, input, amount, ip);
+  }
+
+  private async closeOpenAttempt(payment: Payment, failureReason: string): Promise<Payment | null> {
+    let outcome: SettlementOutcome;
+    try {
+      outcome = await this.verifyAndSettle(payment.txRef, 'sweep');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Could not verify ${payment.txRef} before opening another attempt: ${message}`);
+      throw new BadGatewayException(PHONE_PROMPT_UNAVAILABLE);
+    }
+    const current = await this.prisma.db.payment.findUnique({ where: { id: payment.id } });
+    if (!current) return payment;
+    if (outcome === 'succeeded' || outcome === 'review' || outcome === 'refunded' || current.status === 'SUCCEEDED' || current.status === 'REVIEW' || current.status === 'REFUNDED' || current.status === 'REVERSED') {
+      return current;
+    }
+    await this.failPending(current, failureReason);
+    const after = await this.prisma.db.payment.findUnique({ where: { id: payment.id } });
+    if (after && after.status !== 'FAILED') return after;
+    return null;
+  }
+
+  private async failPending(payment: Payment, failureReason: string): Promise<void> {
+    await this.prisma.tenant(payment.schoolId, async (tx) => {
+      const pending = await tx.payment.updateMany({
+        where: { id: payment.id, status: 'PENDING' },
+        data: { status: 'FAILED', failureReason },
+      });
+      if (pending.count === 0) {
+        await tx.payment.updateMany({
+          where: { id: payment.id, status: 'FAILED' },
+          data: { failureReason },
+        });
+      }
+    });
+  }
+
+  private async createPhoneAttempt(
+    payToken: string,
+    invoice: PayableInvoice,
+    input: StartPaymentInput,
+    amount: number,
+    ip?: string,
+  ): Promise<StartPaymentResult> {
+    const txRef = `${invoice.school.code}-${randomReference(14)}`;
+    try {
+      const payment = await this.prisma.tenant(invoice.schoolId, async (tx) => {
+        const created = await tx.payment.create({
+          data: {
+            schoolId: invoice.schoolId,
+            invoiceId: invoice.id,
+            txRef,
+            gateway: 'arifpay',
+            amount,
+            currency: invoice.currency,
+            payerName: input.payerName,
+            payerPhone: input.payerPhone,
+            payerEmail: input.payerEmail,
+            payerMethod: input.method,
+          },
+        });
+        await this.audit.record(
+          {
+            schoolId: invoice.schoolId,
+            actorType: 'payer',
+            actorId: null,
+            action: 'payment.started',
+            entityType: 'Payment',
+            entityId: created.id,
+            metadata: { txRef, amount, invoiceNumber: invoice.number, method: input.method },
+            ip,
+          },
+          tx,
+        );
+        return created;
+      });
+      return this.dispatchPhonePrompt(payToken, invoice, payment, input);
+    } catch (error) {
+      if (!isPendingInvoiceConflict(error)) throw error;
+      const winner = await this.prisma.db.payment.findFirst({
+        where: { invoiceId: invoice.id, status: 'PENDING' },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!winner) throw error;
+      return this.dispatchPhonePrompt(payToken, invoice, winner, { ...input, method: payerMethodOf(winner.payerMethod) });
+    }
+  }
+
+  private payoutBeneficiary(school: PayableInvoice['school'], amount: number): DirectPayBeneficiary {
+    if (!school.payoutBankCode || !school.payoutAccountEncrypted) {
+      throw new BadRequestException('This school has not finished its payout setup');
+    }
+    let accountNumber: string;
+    try {
+      accountNumber = this.secrets.decrypt(school.payoutAccountEncrypted).trim();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Payout account could not be read: ${message}`);
+      throw new BadRequestException('This school has not finished its payout setup');
+    }
+    if (!accountNumber) throw new BadRequestException('This school has not finished its payout setup');
+    return { accountNumber, bank: school.payoutBankCode, amount };
+  }
+
+  private phonePromptView(payment: Payment): StartPaymentResult {
+    return {
+      kind: 'phone_prompt',
+      txRef: payment.txRef,
+      method: payerMethodOf(payment.payerMethod),
+      expiresAt: (payment.sessionExpiresAt ?? new Date(Date.now() + PHONE_PROMPT_WINDOW_MS)).toISOString(),
+    };
+  }
+
+  private async dispatchPhonePrompt(
+    payToken: string,
+    invoice: PayableInvoice,
+    payment: Payment,
+    input: StartPaymentInput,
+  ): Promise<StartPaymentResult> {
+    const gateway = this.gateways.get(payment.gateway);
+    if (!gateway.directPay) throw new BadGatewayException(PHONE_PROMPT_UNAVAILABLE);
+    const expiresAt = payment.sessionExpiresAt ?? new Date(Date.now() + PHONE_PROMPT_WINDOW_MS);
+    const email = input.payerEmail ?? this.env.ARIFPAY_FALLBACK_EMAIL ?? invoice.school.contactEmail;
+    try {
+      const result = await gateway.directPay({
+        txRef: payment.txRef,
+        amount: payment.amount,
+        currency: 'ETB',
+        method: input.method,
+        phone: input.payerPhone,
+        email,
+        notifyUrl: `${this.env.API_PUBLIC_URL}/webhooks/arifpay`,
+        returnUrl: `${this.env.WEB_URL}/pay/${payToken}/return?tx=${encodeURIComponent(payment.txRef)}`,
+        title: 'School Fees',
+        description: `${invoice.school.code} ${invoice.number}`,
+        expiresAt,
+        beneficiary: this.payoutBeneficiary(invoice.school, payment.amount),
+      });
+      await this.prisma.tenant(invoice.schoolId, (tx) =>
+        tx.payment.update({
+          where: { id: payment.id },
+          data: { gatewaySessionId: result.sessionId, sessionExpiresAt: new Date(result.expiresAt) },
+        }),
+      );
+      if (result.alreadySucceeded) {
+        await this.verifyAndSettle(payment.txRef, 'sweep');
+        return this.phonePromptView({ ...payment, payerMethod: input.method, sessionExpiresAt: new Date(result.expiresAt) });
+      }
+      if (result.alreadyFailed) {
+        await this.failPending(payment, 'gateway_reported_failed');
+        throw new BadGatewayException(PHONE_PROMPT_UNAVAILABLE);
+      }
+      await this.enqueueVerification(payment.txRef, 'sweep', 15 * 60 * 1000);
+      return { kind: 'phone_prompt', txRef: payment.txRef, method: input.method, expiresAt: result.expiresAt };
+    } catch (error) {
+      if (error instanceof BadGatewayException || error instanceof BadRequestException) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Phone prompt failed for ${payment.txRef}: ${message}`);
+      const current = await this.prisma.db.payment.findUnique({ where: { id: payment.id } });
+      if (current?.gatewaySessionId) throw new BadGatewayException(PHONE_PROMPT_UNAVAILABLE);
+      await this.prisma.tenant(invoice.schoolId, (tx) =>
+        tx.payment.updateMany({
+          where: { id: payment.id, status: 'PENDING' },
+          data: { status: 'FAILED', failureReason: 'initialize_failed' },
+        }),
+      );
+      throw new BadGatewayException(PHONE_PROMPT_UNAVAILABLE);
     }
   }
 

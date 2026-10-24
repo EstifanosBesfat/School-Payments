@@ -1,6 +1,8 @@
+import { Prisma } from '@payment/db';
 import { AuditService } from '../audit/audit.service';
+import { SecretBox } from '../common/crypto.util';
 import type { AppEnv } from '../config/config.module';
-import { GatewayError, type VerifiedTransaction } from '../gateways/payment-gateway.interface';
+import { GatewayError, type DirectPayRequest, type DirectPayResult, type VerifiedTransaction } from '../gateways/payment-gateway.interface';
 import { LedgerService } from '../ledger/ledger.service';
 import { JOBS, QUEUES } from '../queue/queue.constants';
 import { PaymentsService } from './payments.service';
@@ -20,6 +22,9 @@ interface StoredPayment {
   payerPhone: string;
   payerEmail: string | null;
   checkoutUrl: string | null;
+  gatewaySessionId: string | null;
+  sessionExpiresAt: Date | null;
+  payerMethod: string | null;
   gatewayReference: string | null;
   method: string | null;
   gatewayFee: number | null;
@@ -45,7 +50,16 @@ interface StoredInvoice {
   paidAt: Date | null;
   term: string | null;
   dueDate: Date;
-  school: { id: string; status: string; code: string; name: string; chapaSubaccountId: string | null };
+  school: {
+    id: string;
+    status: string;
+    code: string;
+    name: string;
+    contactEmail: string;
+    chapaSubaccountId: string | null;
+    payoutBankCode: string | null;
+    payoutAccountEncrypted: string | null;
+  };
   student: { firstName: string; lastName: string };
   lines: { description: string; amount: number; position: number }[];
 }
@@ -64,12 +78,15 @@ function verified(overrides: Partial<VerifiedTransaction> & Pick<VerifiedTransac
   };
 }
 
-function harness() {
+function harness(gatewayName: 'chapa' | 'arifpay' = 'chapa') {
   const payments: StoredPayment[] = [];
   const invoices: StoredInvoice[] = [];
   const audits: { action: string; entityId?: string | null }[] = [];
   const ledgerPosts: unknown[][] = [];
   const jobs: { queue: string; name: string; data: unknown; jobId?: string }[] = [];
+  const tenantIds: string[] = [];
+  const secrets = new SecretBox(Buffer.alloc(32, 3).toString('base64'));
+  const payoutAccountNumber = '1000123456789';
   let paymentSeq = 0;
   let tail = Promise.resolve();
 
@@ -85,21 +102,35 @@ function harness() {
     paidAt: null,
     term: '1',
     dueDate: new Date('2026-11-01'),
-    school: { id: 'school_1', status: 'ACTIVE', code: 'DEMO', name: 'Demo School', chapaSubaccountId: 'sub_1' },
+    school: {
+      id: 'school_1',
+      status: 'ACTIVE',
+      code: 'DEMO',
+      name: 'Demo School',
+      contactEmail: 'fees@demo.school',
+      chapaSubaccountId: 'sub_1',
+      payoutBankCode: 'AWINETAA',
+      payoutAccountEncrypted: secrets.encrypt(payoutAccountNumber),
+    },
     student: { firstName: 'Sara', lastName: 'Bekele' },
     lines: [{ description: 'Tuition', amount: AMOUNT, position: 0 }],
   };
   const invoiceB: StoredInvoice = { ...invoiceA, id: 'inv_b', payToken: 'pay-token-b', number: 'INV-2', paidAmount: 0, status: 'ISSUED' };
   invoices.push(invoiceA, invoiceB);
 
-  function findPayment(where: { id?: string; txRef?: string }): StoredPayment | undefined {
-    return payments.find((payment) => (where.id ? payment.id === where.id : true) && (where.txRef ? payment.txRef === where.txRef : true));
+  function findPayment(where: { id?: string; txRef?: string; gatewayReference?: string }): StoredPayment | undefined {
+    return payments.find(
+      (payment) =>
+        (where.id ? payment.id === where.id : true) &&
+        (where.txRef ? payment.txRef === where.txRef : true) &&
+        (where.gatewayReference ? payment.gatewayReference === where.gatewayReference : true),
+    );
   }
 
   const tx = {
     $queryRaw: async () => [],
     payment: {
-      findUnique: async ({ where }: { where: { id?: string; txRef?: string } }) => findPayment(where) ?? null,
+      findUnique: async ({ where }: { where: { id?: string; txRef?: string; gatewayReference?: string } }) => findPayment(where) ?? null,
       findUniqueOrThrow: async ({ where }: { where: { id?: string; txRef?: string } }) => {
         const payment = findPayment(where);
         if (!payment) throw new Error('payment missing');
@@ -121,6 +152,15 @@ function harness() {
         return matches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ?? null;
       },
       create: async ({ data }: { data: Partial<StoredPayment> }) => {
+        const status = data.status ?? 'PENDING';
+        const invoiceId = data.invoiceId ?? invoiceA.id;
+        if (status === 'PENDING' && payments.some((payment) => payment.invoiceId === invoiceId && payment.status === 'PENDING')) {
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed on payment_one_pending_per_invoice', {
+            code: 'P2002',
+            clientVersion: 'test',
+            meta: { target: 'payment_one_pending_per_invoice' },
+          });
+        }
         paymentSeq += 1;
         const payment: StoredPayment = {
           id: `pay_${paymentSeq}`,
@@ -135,6 +175,9 @@ function harness() {
           payerPhone: '+251911223344',
           payerEmail: null,
           checkoutUrl: null,
+          gatewaySessionId: null,
+          sessionExpiresAt: null,
+          payerMethod: null,
           gatewayReference: null,
           method: null,
           gatewayFee: null,
@@ -167,6 +210,8 @@ function harness() {
     invoice: {
       findUnique: async ({ where }: { where: { id?: string; payToken?: string } }) =>
         invoices.find((invoice) => (where.id ? invoice.id === where.id : invoice.payToken === where.payToken)) ?? null,
+      findFirst: async ({ where }: { where: { id?: string; schoolId?: string } }) =>
+        invoices.find((invoice) => (where.id ? invoice.id === where.id : true) && (where.schoolId ? invoice.schoolId === where.schoolId : true)) ?? null,
       findUniqueOrThrow: async ({ where }: { where: { id: string } }) => {
         const invoice = invoices.find((item) => item.id === where.id);
         if (!invoice) throw new Error('invoice missing');
@@ -196,7 +241,8 @@ function harness() {
 
   const prisma = {
     db: tx,
-    tenant: async (_schoolId: string, fn: (client: typeof tx) => Promise<unknown>) => {
+    tenant: async (schoolId: string, fn: (client: typeof tx) => Promise<unknown>) => {
+      tenantIds.push(schoolId);
       const run = tail.then(() => fn(tx));
       tail = run.then(
         () => undefined,
@@ -207,8 +253,18 @@ function harness() {
   };
 
   const verify = jest.fn<Promise<VerifiedTransaction>, [string]>();
+  const verifySession = jest.fn(async (_sessionId: string, txRef: string) => verify(txRef));
   const initialize = jest.fn(async (request: { txRef: string }) => ({ checkoutUrl: `https://checkout.test/${request.txRef}` }));
-  const gateway = { name: 'chapa', verify, initialize };
+  const directPay = jest.fn(async (request: DirectPayRequest): Promise<DirectPayResult> => ({
+    sessionId: `sess-${request.txRef}`,
+    expiresAt: request.expiresAt.toISOString(),
+    alreadySucceeded: false,
+    alreadyFailed: false,
+  }));
+  const gateway =
+    gatewayName === 'arifpay'
+      ? { name: gatewayName, verify, verifySession, initialize, directPay }
+      : { name: gatewayName, verify, initialize };
   const queues = {
     add: jest.fn(async (queue: string, name: string, data: unknown, options?: { jobId?: string }) => {
       jobs.push({ queue, name, data, jobId: options?.jobId });
@@ -217,13 +273,20 @@ function harness() {
   };
   const outbound = { emit: jest.fn(async () => undefined) };
   const service = new PaymentsService(
-    { PLATFORM_FEE_VALUE: 0, PLATFORM_FEE_TYPE: 'percentage', API_PUBLIC_URL: 'http://localhost:4000', WEB_URL: 'http://localhost:3000' } as AppEnv,
+    {
+      PLATFORM_FEE_VALUE: 0,
+      PLATFORM_FEE_TYPE: 'percentage',
+      API_PUBLIC_URL: 'http://localhost:4000',
+      WEB_URL: 'http://localhost:3000',
+      ARIFPAY_FALLBACK_EMAIL: 'fees@demo.school',
+    } as AppEnv,
     prisma as never,
     { get: () => gateway, default: () => gateway } as never,
     new LedgerService(prisma as never),
     new AuditService(prisma as never),
     queues as never,
     outbound as never,
+    secrets,
   );
 
   function seedPayment(overrides: Partial<StoredPayment> = {}): StoredPayment {
@@ -241,6 +304,9 @@ function harness() {
       payerPhone: '+251911223344',
       payerEmail: null,
       checkoutUrl: 'https://checkout.test/DEMO-TX1',
+      gatewaySessionId: null,
+      sessionExpiresAt: null,
+      payerMethod: null,
       gatewayReference: null,
       method: null,
       gatewayFee: null,
@@ -258,7 +324,24 @@ function harness() {
     return payment;
   }
 
-  return { service, payments, invoices, invoiceA, invoiceB, audits, ledgerPosts, jobs, verify, initialize, outbound, seedPayment };
+  return {
+    service,
+    payments,
+    invoices,
+    invoiceA,
+    invoiceB,
+    audits,
+    ledgerPosts,
+    jobs,
+    verify,
+    verifySession,
+    initialize,
+    directPay,
+    outbound,
+    tenantIds,
+    payoutAccountNumber,
+    seedPayment,
+  };
 }
 
 describe('Chapa card retry settlement', () => {
@@ -299,8 +382,11 @@ describe('Chapa card retry settlement', () => {
 
   it('starts a new tx_ref after a failed attempt and settles that attempt on its own', async () => {
     const { service, payments, invoiceA, verify, initialize } = harness();
-    const payer = { payerName: 'Abebe Bekele', payerPhone: '+251911223344' };
+    const payer = { payerName: 'Abebe Bekele', payerPhone: '+251911223344', method: 'telebirr' as const };
     const first = await service.start(invoiceA.payToken, payer);
+    expect(first).toMatchObject({ kind: 'redirect' });
+    if (first.kind !== 'redirect') throw new Error('expected a hosted checkout redirect');
+    expect(first.checkoutUrl).toContain(first.txRef);
     verify.mockResolvedValueOnce(verified({ status: 'failed', txRef: first.txRef }));
     await expect(service.verifyAndSettle(first.txRef, 'callback')).resolves.toBe('failed');
 
@@ -432,5 +518,246 @@ describe('Chapa card retry settlement', () => {
     expect(verify).not.toHaveBeenCalled();
     expect(payments).toHaveLength(0);
     expect(invoiceA.paidAmount).toBe(0);
+  });
+});
+
+describe('ArifPay phone prompt start', () => {
+  const payer = { payerName: 'Abebe Bekele', payerPhone: '+251911223344', payerEmail: 'abebe@example.com', method: 'telebirr' as const };
+  const cbePayer = { ...payer, payerPhone: '+251711223344', method: 'cbe_birr' as const };
+
+  it('returns a phone prompt and reuses the same attempt before the session expires', async () => {
+    const { service, payments, invoiceA, directPay, initialize, tenantIds, payoutAccountNumber } = harness('arifpay');
+    const first = await service.start(invoiceA.payToken, payer, '127.0.0.1');
+    expect(first.kind).toBe('phone_prompt');
+    if (first.kind !== 'phone_prompt') throw new Error('expected a phone prompt');
+    expect(first.method).toBe('telebirr');
+    expect(first.txRef.startsWith('DEMO-')).toBe(true);
+    expect(new Date(first.expiresAt).getTime()).toBeGreaterThan(Date.now());
+    expect(initialize).not.toHaveBeenCalled();
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({
+      schoolId: invoiceA.schoolId,
+      invoiceId: invoiceA.id,
+      status: 'PENDING',
+      amount: AMOUNT,
+      payerMethod: 'telebirr',
+      gateway: 'arifpay',
+      gatewaySessionId: `sess-${first.txRef}`,
+    });
+    expect(directPay).toHaveBeenCalledTimes(1);
+    expect(directPay).toHaveBeenCalledWith(
+      expect.objectContaining({
+        txRef: first.txRef,
+        amount: AMOUNT,
+        currency: 'ETB',
+        method: 'telebirr',
+        phone: '+251911223344',
+        email: 'abebe@example.com',
+        notifyUrl: 'http://localhost:4000/webhooks/arifpay',
+        returnUrl: `http://localhost:3000/pay/${invoiceA.payToken}/return?tx=${encodeURIComponent(first.txRef)}`,
+        beneficiary: { accountNumber: payoutAccountNumber, bank: 'AWINETAA', amount: AMOUNT },
+      }),
+    );
+    expect(tenantIds).toContain(invoiceA.schoolId);
+    expect(invoiceA.status).toBe('ISSUED');
+    expect(invoiceA.paidAmount).toBe(0);
+
+    const second = await service.start(invoiceA.payToken, { ...payer, payerPhone: '+251922334455' });
+    expect(second).toMatchObject({ kind: 'phone_prompt', txRef: first.txRef, method: 'telebirr' });
+    expect(payments).toHaveLength(1);
+    expect(directPay).toHaveBeenCalledTimes(2);
+    const replay = directPay.mock.calls[1]?.[0];
+    expect(replay?.txRef).toBe(first.txRef);
+    expect(replay?.method).toBe('telebirr');
+  });
+
+  it('verifies a pending Telebirr attempt before switching to CBE Birr', async () => {
+    const { service, payments, invoiceA, verify, directPay } = harness('arifpay');
+    const first = await service.start(invoiceA.payToken, payer);
+    verify.mockResolvedValueOnce(verified({ status: 'pending', txRef: first.txRef, amount: 0, gatewayReference: null }));
+
+    const second = await service.start(invoiceA.payToken, cbePayer);
+    expect(verify).toHaveBeenCalledWith(first.txRef);
+    expect(second.kind).toBe('phone_prompt');
+    if (second.kind !== 'phone_prompt') throw new Error('expected a phone prompt');
+    expect(second.txRef).not.toBe(first.txRef);
+    expect(second.method).toBe('cbe_birr');
+    expect(payments.find((payment) => payment.txRef === first.txRef)).toMatchObject({
+      status: 'FAILED',
+      failureReason: 'superseded_by_method_change',
+    });
+    expect(payments.filter((payment) => payment.status === 'PENDING')).toHaveLength(1);
+    expect(payments.find((payment) => payment.txRef === second.txRef)?.payerMethod).toBe('cbe_birr');
+    expect(directPay).toHaveBeenCalledTimes(2);
+    expect(invoiceA.status).toBe('ISSUED');
+    expect(invoiceA.paidAmount).toBe(0);
+  });
+
+  it('settles a verified Telebirr success instead of opening a CBE Birr attempt', async () => {
+    const { service, payments, invoiceA, invoiceB, verify, directPay } = harness('arifpay');
+    const first = await service.start(invoiceA.payToken, payer);
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: first.txRef }));
+
+    const second = await service.start(invoiceA.payToken, cbePayer);
+    expect(second).toMatchObject({ kind: 'phone_prompt', txRef: first.txRef, method: 'telebirr' });
+    expect(payments).toHaveLength(1);
+    expect(payments[0]?.status).toBe('SUCCEEDED');
+    expect(directPay).toHaveBeenCalledTimes(1);
+    expect(invoiceA.status).toBe('PAID');
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
+    expect(invoiceB.status).toBe('ISSUED');
+    expect(invoiceB.paidAmount).toBe(0);
+  });
+
+  it('returns the single pending row when two starts race', async () => {
+    const { service, payments, invoiceA, directPay } = harness('arifpay');
+    directPay.mockImplementation(async (request: DirectPayRequest) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        sessionId: `sess-${request.txRef}`,
+        expiresAt: request.expiresAt.toISOString(),
+        alreadySucceeded: false,
+        alreadyFailed: false,
+      };
+    });
+
+    const [first, second] = await Promise.all([service.start(invoiceA.payToken, payer), service.start(invoiceA.payToken, payer)]);
+    expect(first).toMatchObject({ kind: 'phone_prompt', txRef: second.kind === 'phone_prompt' ? second.txRef : first.txRef });
+    if (first.kind !== 'phone_prompt' || second.kind !== 'phone_prompt') throw new Error('expected phone prompts');
+    expect(second.txRef).toBe(first.txRef);
+    expect(payments.filter((payment) => payment.status === 'PENDING')).toHaveLength(1);
+    expect(payments).toHaveLength(1);
+    expect(directPay.mock.calls.every((call) => call[0].txRef === first.txRef)).toBe(true);
+  });
+
+  it('verifies an expired prompt and mints a new nonce only when it is unpaid', async () => {
+    const { service, payments, invoiceA, verify, directPay } = harness('arifpay');
+    const first = await service.start(invoiceA.payToken, payer);
+    const row = payments.find((payment) => payment.txRef === first.txRef);
+    if (!row?.sessionExpiresAt) throw new Error('expected a session expiry');
+    row.sessionExpiresAt = new Date(Date.now() - 1000);
+    verify.mockResolvedValueOnce(verified({ status: 'pending', txRef: first.txRef, amount: 0, gatewayReference: null }));
+
+    const second = await service.start(invoiceA.payToken, payer);
+    expect(verify).toHaveBeenCalledWith(first.txRef);
+    expect(row.status).toBe('FAILED');
+    expect(row.failureReason).toBe('expired');
+    expect(second.kind).toBe('phone_prompt');
+    if (second.kind !== 'phone_prompt') throw new Error('expected a phone prompt');
+    expect(second.txRef).not.toBe(first.txRef);
+    expect(payments.filter((payment) => payment.status === 'PENDING')).toHaveLength(1);
+    expect(directPay.mock.calls[1]?.[0].txRef).toBe(second.txRef);
+    expect(invoiceA.paidAmount).toBe(0);
+  });
+
+  it('does not mint a new nonce when the expired prompt verifies as paid', async () => {
+    const { service, payments, invoiceA, verify, directPay } = harness('arifpay');
+    const first = await service.start(invoiceA.payToken, payer);
+    const row = payments.find((payment) => payment.txRef === first.txRef);
+    if (!row) throw new Error('missing attempt');
+    row.sessionExpiresAt = new Date(Date.now() - 1000);
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: first.txRef }));
+
+    const second = await service.start(invoiceA.payToken, payer);
+    expect(second).toMatchObject({ kind: 'phone_prompt', txRef: first.txRef });
+    expect(payments).toHaveLength(1);
+    expect(row.status).toBe('SUCCEEDED');
+    expect(directPay).toHaveBeenCalledTimes(1);
+    expect(invoiceA.status).toBe('PAID');
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
+  });
+
+  it('marks a prompt FAILED when directPay fails before a session id exists, without naming a provider', async () => {
+    const { service, payments, invoiceA, ledgerPosts, directPay } = harness('arifpay');
+    directPay.mockRejectedValueOnce(new GatewayError('ArifPay POST /api/checkout/telebirr-ussd/transfer/direct failed (500): internal system error', true));
+
+    let thrown: unknown;
+    try {
+      await service.start(invoiceA.payToken, payer);
+    } catch (error) {
+      thrown = error;
+    }
+    const message = thrown instanceof Error ? thrown.message : '';
+    expect(message).toMatch(/could not send the request to your phone/i);
+    expect(message.toLowerCase()).not.toContain('arifpay');
+    expect(message.toLowerCase()).not.toContain('chapa');
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({ status: 'FAILED', failureReason: 'initialize_failed', gatewaySessionId: null });
+    expect(payments.filter((payment) => payment.txRef === payments[0]?.txRef)).toHaveLength(1);
+    expect(invoiceA.status).toBe('ISSUED');
+    expect(invoiceA.paidAmount).toBe(0);
+    expect(ledgerPosts).toHaveLength(0);
+  });
+
+  it('keeps the attempt pending when a later directPay fails after the session id was saved', async () => {
+    const { service, payments, invoiceA, directPay } = harness('arifpay');
+    const first = await service.start(invoiceA.payToken, payer);
+    const sessionId = payments[0]?.gatewaySessionId;
+    expect(sessionId).toBe(`sess-${first.txRef}`);
+    directPay.mockRejectedValueOnce(new GatewayError('ArifPay POST failed (500): internal system error', true));
+
+    await expect(service.start(invoiceA.payToken, payer)).rejects.toThrow(/could not send the request to your phone/i);
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({ status: 'PENDING', gatewaySessionId: sessionId, txRef: first.txRef });
+    expect(invoiceA.status).toBe('ISSUED');
+    expect(invoiceA.paidAmount).toBe(0);
+
+    const third = await service.start(invoiceA.payToken, payer);
+    expect(third).toMatchObject({ kind: 'phone_prompt', txRef: first.txRef, method: 'telebirr' });
+    expect(payments).toHaveLength(1);
+    expect(payments[0]?.status).toBe('PENDING');
+  });
+
+  it('rejects unpaid invoices, inactive schools, and a school with no payout account', async () => {
+    const { service, payments, invoiceA, directPay } = harness('arifpay');
+    const encrypted = invoiceA.school.payoutAccountEncrypted;
+    const bank = invoiceA.school.payoutBankCode;
+
+    invoiceA.status = 'PAID';
+    await expect(service.start(invoiceA.payToken, payer)).rejects.toThrow(/paid/);
+    invoiceA.status = 'CANCELLED';
+    await expect(service.start(invoiceA.payToken, payer)).rejects.toThrow(/cancelled/);
+    invoiceA.status = 'PARTIALLY_PAID';
+    invoiceA.paidAmount = invoiceA.totalAmount;
+    await expect(service.start(invoiceA.payToken, payer)).rejects.toThrow(/Nothing left to pay/);
+
+    invoiceA.status = 'ISSUED';
+    invoiceA.paidAmount = 0;
+    invoiceA.school.status = 'SUSPENDED';
+    await expect(service.start(invoiceA.payToken, payer)).rejects.toThrow(/not accepting online payments/);
+
+    invoiceA.school.status = 'ACTIVE';
+    invoiceA.school.payoutAccountEncrypted = null;
+    await expect(service.start(invoiceA.payToken, payer)).rejects.toThrow(/payout setup/);
+    invoiceA.school.payoutAccountEncrypted = encrypted;
+    invoiceA.school.payoutBankCode = null;
+    await expect(service.start(invoiceA.payToken, payer)).rejects.toThrow(/payout setup/);
+    invoiceA.school.payoutBankCode = bank;
+
+    expect(directPay).not.toHaveBeenCalled();
+    expect(payments).toHaveLength(0);
+    expect(invoiceA.paidAmount).toBe(0);
+    expect(invoiceA.status).toBe('ISSUED');
+  });
+
+  it('charges the remaining balance and takes schoolId from the invoice', async () => {
+    const { service, payments, invoiceA, directPay, tenantIds, payoutAccountNumber } = harness('arifpay');
+    invoiceA.status = 'PARTIALLY_PAID';
+    invoiceA.paidAmount = 50_000;
+    invoiceA.schoolId = 'school_9';
+    invoiceA.school.id = 'school_9';
+
+    const started = await service.start(invoiceA.payToken, payer);
+    expect(started.kind).toBe('phone_prompt');
+    expect(payments[0]).toMatchObject({ schoolId: 'school_9', amount: 100_000, status: 'PENDING' });
+    expect(directPay).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amount: 100_000,
+        beneficiary: { accountNumber: payoutAccountNumber, bank: 'AWINETAA', amount: 100_000 },
+      }),
+    );
+    expect(tenantIds).toContain('school_9');
+    expect(invoiceA.paidAmount).toBe(50_000);
+    expect(invoiceA.status).toBe('PARTIALLY_PAID');
   });
 });

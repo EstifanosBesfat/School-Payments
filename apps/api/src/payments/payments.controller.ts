@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { paginationSchema, PAYMENT_STATUSES, type StartPaymentInput, startPaymentSchema } from '@payment/shared';
+import { paginationSchema, PAYMENT_STATUSES, type StartPaymentInput, type StartPaymentResult, startPaymentSchema } from '@payment/shared';
 import { z } from 'zod';
 import { ApiKeyScopes, ClientIp, CurrentPrincipal, Public, Roles } from '../common/decorators';
 import { Idempotent } from '../common/idempotency.interceptor';
@@ -35,12 +35,12 @@ export class PaymentsController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Idempotent()
   @Post('pay/:token/start')
-  @ApiOperation({ summary: 'Start a payment and get the gateway checkout URL' })
+  @ApiOperation({ summary: 'Start a payment' })
   start(
     @Param('token') token: string,
     @Body(zodBody(startPaymentSchema)) body: StartPaymentInput,
     @ClientIp() ip: string | undefined,
-  ) {
+  ): Promise<StartPaymentResult> {
     return this.payments.start(token, body, ip);
   }
 
