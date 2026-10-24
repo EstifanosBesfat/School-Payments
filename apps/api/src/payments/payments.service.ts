@@ -427,9 +427,13 @@ export class PaymentsService implements OnModuleInit {
     if (payment.status === 'REFUNDED' || payment.status === 'REVERSED') return 'already_final';
     if (payment.status === 'FAILED' && payment.failureReason?.startsWith('initialize_failed')) return 'already_final';
 
+    const gateway = this.gateways.get(payment.gateway);
     let verified: VerifiedTransaction;
     try {
-      verified = await this.gateways.get(payment.gateway).verify(txRef);
+      verified =
+        payment.gatewaySessionId && gateway.verifySession
+          ? await gateway.verifySession(payment.gatewaySessionId, payment.txRef)
+          : await gateway.verify(txRef);
     } catch (error) {
       if (error instanceof GatewayError && !error.retryable) {
         this.logger.error(`Non-retryable verify error for ${txRef}: ${error.message}`);

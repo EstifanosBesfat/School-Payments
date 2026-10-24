@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto';
+import { ConflictException } from '@nestjs/common';
 import { Prisma } from '@payment/db';
 import type { Job } from 'bullmq';
+import { ArifPayGateway } from '../gateways/arifpay.gateway';
 import { ChapaGateway } from '../gateways/chapa.gateway';
 import { JOBS, type ProcessWebhookEventJob } from '../queue/queue.constants';
 import { GatewaySuccessUnconfirmedError, gatewayPayloadClaimsSuccess, WebhooksService } from './webhooks.service';
@@ -17,6 +19,8 @@ function harness() {
   const added: { webhookEventId: string }[] = [];
   let handler: ((job: Job<ProcessWebhookEventJob>) => Promise<void>) | undefined;
   const verifyAndSettle = jest.fn();
+  const acquire = jest.fn(async () => true);
+  const release = jest.fn(async () => undefined);
 
   const prisma = {
     db: {
@@ -47,7 +51,12 @@ function harness() {
 
   const service = new WebhooksService(
     prisma as never,
-    { get: () => new ChapaGateway({ baseUrl: 'https://api.chapa.co/v1', secretKey: 'test', webhookSecret: secret }) } as never,
+    {
+      get: (name: string) =>
+        name === 'arifpay'
+          ? new ArifPayGateway({ baseUrl: 'https://gateway.arifpay.org', apiKey: 'sandbox-key', sandbox: true })
+          : new ChapaGateway({ baseUrl: 'https://api.chapa.co/v1', secretKey: 'test', webhookSecret: secret }),
+    } as never,
     { verifyAndSettle } as never,
     {
       register: (_queue: string, _name: string, fn: (job: Job<ProcessWebhookEventJob>) => Promise<void>) => {
@@ -57,6 +66,7 @@ function harness() {
         added.push(data);
       },
     } as never,
+    { acquire, release } as never,
   );
   service.onModuleInit();
   if (!handler) throw new Error('webhook handler was not registered');
@@ -67,7 +77,11 @@ function harness() {
     return service.receive('chapa', Buffer.from(raw), { 'x-chapa-signature': sign(raw) });
   }
 
-  return { service, events, added, verifyAndSettle, process, receive };
+  async function receiveArifpay(body: Record<string, unknown>) {
+    return service.receive('arifpay', Buffer.from(JSON.stringify(body)), {});
+  }
+
+  return { service, events, added, verifyAndSettle, process, receive, receiveArifpay, acquire, release };
 }
 
 describe('gatewayPayloadClaimsSuccess', () => {
@@ -77,12 +91,30 @@ describe('gatewayPayloadClaimsSuccess', () => {
     expect(gatewayPayloadClaimsSuccess({ event: 'charge.failed/cancelled', status: 'failed/cancelled' })).toBe(false);
     expect(gatewayPayloadClaimsSuccess({ event: 'charge.failed', status: 'failed' })).toBe(false);
     expect(gatewayPayloadClaimsSuccess(null)).toBe(false);
+    expect(
+      gatewayPayloadClaimsSuccess({
+        nonce: 'DEMO-ABC',
+        sessionId: 'ED54BDB4D5BF2D',
+        transactionStatus: 'SUCCESS',
+        transaction: { transactionStatus: 'SUCCESS' },
+      }),
+    ).toBe(true);
+    expect(gatewayPayloadClaimsSuccess({ nonce: 'DEMO-ABC', transactionStatus: 'FAILED' })).toBe(false);
+    expect(gatewayPayloadClaimsSuccess({ nonce: 'DEMO-ABC', transactionStatus: 'CANCELED' })).toBe(false);
   });
 });
 
 describe('Chapa webhook delivery', () => {
   const failedBody = { event: 'charge.failed/cancelled', tx_ref: 'DEMO-TX1', status: 'failed/cancelled', amount: '1500.00' };
   const successBody = { event: 'charge.success', tx_ref: 'DEMO-TX1', status: 'success', amount: '1500.00', reference: 'AP123' };
+
+  it('returns 409 when another worker already holds the tx_ref lock', async () => {
+    const { added, events, acquire, receive } = harness();
+    acquire.mockResolvedValueOnce(false);
+    await expect(receive(successBody)).rejects.toBeInstanceOf(ConflictException);
+    expect(events.size).toBe(0);
+    expect(added).toHaveLength(0);
+  });
 
   it('stores one row for a redelivered failure and still accepts the later success', async () => {
     const { added, receive } = harness();
@@ -164,5 +196,78 @@ describe('Chapa webhook delivery', () => {
     await process({ name: JOBS.processWebhookEvent, data: { webhookEventId: eventId } } as Job<ProcessWebhookEventJob>);
     expect(events.get(eventId ?? '')?.status).toBe('PROCESSED');
     expect(events.get(eventId ?? '')?.error).toBe('Verification did not match this payment');
+  });
+});
+
+describe('ArifPay notify', () => {
+  const successNotify = {
+    uuid: 'ED54BDB4D5BF2D',
+    sessionId: 'ED54BDB4D5BF2D',
+    nonce: 'DEMO-ABC',
+    phone: '251911111111',
+    paymentMethod: 'TELEBIRR_USSD',
+    totalAmount: 100,
+    transactionStatus: 'SUCCESS',
+    transaction: { transactionId: 'BCI6FETYVI', transactionStatus: 'SUCCESS' },
+  };
+
+  it('stores a notify without settling, and treats a second copy as a duplicate', async () => {
+    const { events, added, verifyAndSettle, receiveArifpay } = harness();
+    const first = await receiveArifpay(successNotify);
+    const duplicate = await receiveArifpay(successNotify);
+    expect(first).toEqual({ received: true, duplicate: false });
+    expect(duplicate).toEqual({ received: true, duplicate: true });
+    expect(verifyAndSettle).not.toHaveBeenCalled();
+    expect(added).toHaveLength(1);
+    expect([...events.values()][0]).toMatchObject({ txRef: 'DEMO-ABC', sessionId: 'ED54BDB4D5BF2D', gateway: 'arifpay' });
+  });
+
+  it('holds the payment row lock and refuses a second delivery while it is held', async () => {
+    const { events, added, acquire, receiveArifpay } = harness();
+    acquire.mockResolvedValueOnce(false);
+    await expect(receiveArifpay(successNotify)).rejects.toBeInstanceOf(ConflictException);
+    expect(events.size).toBe(0);
+    expect(added).toHaveLength(0);
+    expect(acquire).toHaveBeenCalledWith('DEMO-ABC');
+  });
+
+  it('ignores an unknown nonce and does not call verify for a body without one', async () => {
+    const { events, verifyAndSettle, process, receiveArifpay } = harness();
+    await receiveArifpay({ ...successNotify, nonce: 'DEMO-MISSING' });
+    const eventId = [...events.keys()][0];
+    if (!eventId) throw new Error('expected a stored notify');
+    verifyAndSettle.mockResolvedValue('unknown_payment');
+    await process({ name: JOBS.processWebhookEvent, data: { webhookEventId: eventId } } as Job<ProcessWebhookEventJob>);
+    expect(events.get(eventId)?.status).toBe('IGNORED');
+    expect(verifyAndSettle).toHaveBeenCalledWith('DEMO-MISSING', 'webhook');
+
+    const before = events.size;
+    await expect(receiveArifpay({ sessionId: 'ED54BDB4D5BF2D', transactionStatus: 'SUCCESS' })).rejects.toThrow(/signature/i);
+    expect(events.size).toBe(before);
+    expect(verifyAndSettle).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps retrying a SUCCESS claim until verify confirms it, and does not downgrade a settled payment', async () => {
+    const { events, verifyAndSettle, process, receiveArifpay } = harness();
+    await receiveArifpay(successNotify);
+    const successId = [...events.keys()][0];
+    if (!successId) throw new Error('expected a stored notify');
+    verifyAndSettle.mockResolvedValueOnce('still_pending');
+    await expect(process({ name: JOBS.processWebhookEvent, data: { webhookEventId: successId } } as Job<ProcessWebhookEventJob>)).rejects.toBeInstanceOf(
+      GatewaySuccessUnconfirmedError,
+    );
+    expect(events.get(successId)?.status).toBe('FAILED');
+
+    verifyAndSettle.mockResolvedValueOnce('succeeded');
+    await process({ name: JOBS.processWebhookEvent, data: { webhookEventId: successId } } as Job<ProcessWebhookEventJob>);
+    expect(events.get(successId)?.status).toBe('PROCESSED');
+
+    await receiveArifpay({ ...successNotify, transactionStatus: 'FAILED', transaction: { transactionId: null, transactionStatus: 'FAILED' } });
+    const failedId = [...events.keys()].find((id) => id !== successId);
+    if (!failedId) throw new Error('expected the failure notify');
+    verifyAndSettle.mockResolvedValueOnce('already_final');
+    await process({ name: JOBS.processWebhookEvent, data: { webhookEventId: failedId } } as Job<ProcessWebhookEventJob>);
+    expect(events.get(failedId)?.status).toBe('PROCESSED');
+    expect(verifyAndSettle).toHaveBeenLastCalledWith('DEMO-ABC', 'webhook');
   });
 });

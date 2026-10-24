@@ -1,7 +1,8 @@
-import { Injectable, Logger, type OnModuleInit, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, type OnModuleInit, UnauthorizedException } from '@nestjs/common';
 import { Prisma } from '@payment/db';
 import type { Job } from 'bullmq';
 import { GatewayRegistry } from '../gateways/gateway.registry';
+import { PaymentLockService } from '../payments/payment-lock.service';
 import { PaymentsService, type SettlementOutcome } from '../payments/payments.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JOBS, type ProcessWebhookEventJob, QUEUES } from '../queue/queue.constants';
@@ -12,12 +13,28 @@ import { QueueService } from '../queue/queue.service';
  * payment: if Chapa's verify call still says failed or pending, the worker must try again
  * instead of acknowledging the event as finished.
  */
+function claimText(value: unknown): string {
+  return typeof value === 'string' ? value.toLowerCase() : '';
+}
+
+function claimsSuccess(value: string): boolean {
+  return value === 'success' || value === 'successful';
+}
+
+/** A gateway body that says the payer succeeded. Chapa uses status/event. ArifPay uses transactionStatus. The body is still only a hint. */
 export function gatewayPayloadClaimsSuccess(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false;
   const body = payload as Record<string, unknown>;
-  const status = typeof body.status === 'string' ? body.status.toLowerCase() : '';
-  const eventName = typeof body.event === 'string' ? body.event.toLowerCase() : '';
-  return status === 'success' || status === 'successful' || eventName === 'charge.success' || eventName === 'payment.success';
+  const nested = body.transaction;
+  const nestedStatus = nested && typeof nested === 'object' ? claimText((nested as Record<string, unknown>).transactionStatus) : '';
+  const eventName = claimText(body.event);
+  return (
+    claimsSuccess(claimText(body.status)) ||
+    claimsSuccess(claimText(body.transactionStatus)) ||
+    claimsSuccess(nestedStatus) ||
+    eventName === 'charge.success' ||
+    eventName === 'payment.success'
+  );
 }
 
 export class GatewaySuccessUnconfirmedError extends Error {
@@ -40,6 +57,7 @@ export class WebhooksService implements OnModuleInit {
     private readonly gateways: GatewayRegistry,
     private readonly payments: PaymentsService,
     private readonly queues: QueueService,
+    private readonly locks: PaymentLockService,
   ) {}
 
   onModuleInit(): void {
@@ -64,6 +82,17 @@ export class WebhooksService implements OnModuleInit {
       throw new UnauthorizedException('Invalid webhook signature');
     }
 
+    // Held for 10 seconds (NX). A Chapa retry storm, or the pending sweep, loses the race and
+    // must not start a second verify for this tx_ref. The lock stays until it expires so the
+    // worker that won can finish; it is released only when this request will not process.
+    if (parsed.txRef) {
+      const acquired = await this.locks.acquire(parsed.txRef);
+      if (!acquired) {
+        this.logger.warn(`Webhook for ${parsed.txRef} arrived while that payment is already being verified`);
+        throw new ConflictException('This payment is already being processed');
+      }
+    }
+
     try {
       const event = await this.prisma.db.webhookEvent.create({
         data: {
@@ -71,6 +100,7 @@ export class WebhooksService implements OnModuleInit {
           eventKey: parsed.eventKey,
           eventType: parsed.eventType,
           txRef: parsed.txRef,
+          sessionId: parsed.sessionId ?? null,
           signatureValid: true,
           payload: JSON.parse(JSON.stringify(parsed.payload ?? {})) as Prisma.InputJsonValue,
         },
@@ -78,6 +108,7 @@ export class WebhooksService implements OnModuleInit {
       await this.queues.add<ProcessWebhookEventJob>(QUEUES.webhooks, JOBS.processWebhookEvent, { webhookEventId: event.id }, { jobId: `whe-${event.id}` });
       return { received: true, duplicate: false };
     } catch (error) {
+      if (parsed.txRef) await this.locks.release(parsed.txRef);
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         return { received: true, duplicate: true };
       }

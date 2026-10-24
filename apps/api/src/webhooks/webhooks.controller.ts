@@ -1,5 +1,5 @@
 import { BadRequestException, Controller, Headers, HttpCode, Param, Post, Req, type RawBodyRequest } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiConflictResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { Public } from '../common/decorators';
@@ -15,6 +15,7 @@ export class WebhooksController {
   @Post(':gateway')
   @HttpCode(200)
   @ApiOperation({ summary: 'Receives payment gateway webhooks (configure this URL in the Chapa dashboard)' })
+  @ApiConflictResponse({ description: 'This tx_ref is already locked by another webhook delivery or the pending-payment sweep' })
   async receive(
     @Param('gateway') gateway: string,
     @Req() request: RawBodyRequest<Request>,

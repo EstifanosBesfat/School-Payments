@@ -1,6 +1,7 @@
 import { Prisma } from '@payment/db';
 import { AuditService } from '../audit/audit.service';
 import { SecretBox } from '../common/crypto.util';
+import type { Principal } from '../common/principal';
 import type { AppEnv } from '../config/config.module';
 import { GatewayError, type DirectPayRequest, type DirectPayResult, type VerifiedTransaction } from '../gateways/payment-gateway.interface';
 import { LedgerService } from '../ledger/ledger.service';
@@ -759,5 +760,83 @@ describe('ArifPay phone prompt start', () => {
     expect(tenantIds).toContain('school_9');
     expect(invoiceA.paidAmount).toBe(50_000);
     expect(invoiceA.status).toBe('PARTIALLY_PAID');
+  });
+});
+
+describe('ArifPay verify and settle', () => {
+  function prompt(overrides: Partial<StoredPayment> = {}) {
+    return {
+      gateway: 'arifpay',
+      gatewaySessionId: 'ED54BDB4D5BF2D',
+      payerMethod: 'telebirr',
+      checkoutUrl: null,
+      txRef: 'DEMO-PROMPT',
+      ...overrides,
+    };
+  }
+
+  it('settles the exact verified amount from the session and leaves a mismatch in review', async () => {
+    const { service, invoiceA, invoiceB, ledgerPosts, jobs, verify, verifySession, seedPayment } = harness('arifpay');
+    const payment = seedPayment(prompt());
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: payment.txRef, method: 'telebirr', gatewayReference: 'BCI6FETYVI' }));
+
+    await expect(service.verifyAndSettle(payment.txRef, 'webhook')).resolves.toBe('succeeded');
+    expect(verifySession).toHaveBeenCalledWith('ED54BDB4D5BF2D', payment.txRef);
+    expect(payment.status).toBe('SUCCEEDED');
+    expect(payment.gatewayReference).toBe('BCI6FETYVI');
+    expect(invoiceA.status).toBe('PAID');
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
+    expect(invoiceB.paidAmount).toBe(0);
+    expect(ledgerPosts).toHaveLength(1);
+    expect(jobs.filter((job) => job.name === JOBS.issueReceipt)).toHaveLength(1);
+
+    const wrongAmount = seedPayment(prompt({ id: 'pay_amount', txRef: 'DEMO-AMOUNT' }));
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: wrongAmount.txRef, amount: AMOUNT - 1 }));
+    await expect(service.verifyAndSettle(wrongAmount.txRef, 'webhook')).resolves.toBe('review');
+    expect(wrongAmount.status).toBe('REVIEW');
+
+    const wrongCurrency = seedPayment(prompt({ id: 'pay_usd', txRef: 'DEMO-USD' }));
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: wrongCurrency.txRef, currency: 'USD' }));
+    await expect(service.verifyAndSettle(wrongCurrency.txRef, 'webhook')).resolves.toBe('review');
+    expect(wrongCurrency.status).toBe('REVIEW');
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
+    expect(ledgerPosts).toHaveLength(1);
+  });
+
+  it('does not downgrade a succeeded prompt when a later verify says failed', async () => {
+    const { service, invoiceA, ledgerPosts, verify, seedPayment } = harness('arifpay');
+    const payment = seedPayment(prompt());
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: payment.txRef }));
+    await expect(service.verifyAndSettle(payment.txRef, 'webhook')).resolves.toBe('succeeded');
+    verify.mockResolvedValueOnce(verified({ status: 'failed', txRef: payment.txRef }));
+    await expect(service.verifyAndSettle(payment.txRef, 'webhook')).resolves.toBe('already_final');
+    expect(payment.status).toBe('SUCCEEDED');
+    expect(invoiceA.status).toBe('PAID');
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
+    expect(ledgerPosts).toHaveLength(1);
+  });
+
+  it('upgrades a failed prompt when a later verify succeeds inside the checkout window', async () => {
+    const { service, invoiceA, verify, verifySession, seedPayment } = harness('arifpay');
+    const payment = seedPayment(
+      prompt({ status: 'FAILED', failureReason: 'gateway_reported_failed', createdAt: new Date(Date.now() - 5 * 60 * 1000) }),
+    );
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: payment.txRef, method: 'telebirr' }));
+    await expect(service.verifyAndSettle(payment.txRef, 'sweep')).resolves.toBe('succeeded');
+    expect(verifySession).toHaveBeenCalledWith('ED54BDB4D5BF2D', payment.txRef);
+    expect(payment.status).toBe('SUCCEEDED');
+    expect(payment.failureReason).toBeNull();
+    expect(invoiceA.status).toBe('PAID');
+  });
+
+  it('settles a pending prompt from the sweep when no notify arrived', async () => {
+    const { service, invoiceA, verify, verifySession, seedPayment } = harness('arifpay');
+    const payment = seedPayment(prompt({ createdAt: new Date(Date.now() - 15 * 60 * 1000) }));
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: payment.txRef, method: 'telebirr', gatewayReference: 'BCI6FETYVI' }));
+    await expect(service.verifyAndSettle(payment.txRef, 'sweep')).resolves.toBe('succeeded');
+    expect(verifySession).toHaveBeenCalledWith('ED54BDB4D5BF2D', payment.txRef);
+    expect(payment.status).toBe('SUCCEEDED');
+    expect(invoiceA.status).toBe('PAID');
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
   });
 });

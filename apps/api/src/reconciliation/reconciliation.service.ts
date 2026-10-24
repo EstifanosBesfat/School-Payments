@@ -4,6 +4,7 @@ import type { Principal } from '../common/principal';
 import { APP_ENV, type AppEnv } from '../config/config.module';
 import { GatewayRegistry } from '../gateways/gateway.registry';
 import type { GatewayTransactionSummary } from '../gateways/payment-gateway.interface';
+import { PaymentLockService } from '../payments/payment-lock.service';
 import { CHECKOUT_RETRY_WINDOW_MS, PaymentsService } from '../payments/payments.service';
 import { PrismaService, type Tx } from '../prisma/prisma.service';
 import { JOBS, QUEUES } from '../queue/queue.constants';
@@ -38,6 +39,7 @@ export class ReconciliationService implements OnModuleInit {
     private readonly payments: PaymentsService,
     private readonly receipts: ReceiptsService,
     private readonly audit: AuditService,
+    private readonly locks: PaymentLockService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -46,13 +48,21 @@ export class ReconciliationService implements OnModuleInit {
     this.queues.register(QUEUES.maintenance, JOBS.cleanup, () => this.cleanup());
     if (this.env.RUN_WORKERS) {
       await this.queues.schedule(QUEUES.maintenance, 'nightly-reconciliation', '30 2 * * *', JOBS.reconcile);
-      await this.queues.schedule(QUEUES.maintenance, 'pending-payment-sweep', '*/10 * * * *', JOBS.sweepPendingPayments);
+      await this.queues.schedule(QUEUES.maintenance, 'pending-payment-sweep', '*/5 * * * *', JOBS.sweepPendingPayments);
       await this.queues.schedule(QUEUES.maintenance, 'daily-cleanup', '0 3 * * *', JOBS.cleanup);
     }
   }
 
-  /** Re-verifies payments still pending, and card declines that can still succeed on the same tx_ref. */
-  async sweepPending(): Promise<{ queued: number }> {
+  /**
+   * Anti-entropy pass for hosted checkout. Chapa can show a transaction as successful while the
+   * webhook never arrives, because the payer left through another redirect or a retry loop in
+   * Chapa's page. Every five minutes this queues a gateway verify for PENDING attempts older
+   * than ten minutes, and for card declines that can still succeed on the same tx_ref.
+   * Each verify calls the provider (Chapa GET /transaction/verify/{txRef}). Only that verified
+   * result can mark the payment succeeded, store the provider reference and payer, and issue
+   * the receipt. A tx_ref already locked by an in-flight webhook is left for that webhook.
+   */
+  async sweepPending(): Promise<{ queued: number; skippedLocked: number }> {
     const now = Date.now();
     const pending = await this.prisma.db.payment.findMany({
       where: {
@@ -69,8 +79,22 @@ export class ReconciliationService implements OnModuleInit {
       orderBy: { createdAt: 'asc' },
       take: SWEEP_BATCH,
     });
-    for (const payment of pending) await this.payments.enqueueVerification(payment.txRef, 'sweep');
-    return { queued: pending.length };
+    let queued = 0;
+    let skippedLocked = 0;
+    for (const payment of pending) {
+      const acquired = await this.locks.acquire(payment.txRef);
+      if (!acquired) {
+        skippedLocked += 1;
+        this.logger.warn(`Skipping sweep for ${payment.txRef}; verification is already in progress`);
+        continue;
+      }
+      await this.payments.enqueueVerification(payment.txRef, 'sweep');
+      queued += 1;
+    }
+    if (queued > 0 || skippedLocked > 0) {
+      this.logger.log(`Pending sweep queued ${queued} verification${queued === 1 ? '' : 's'} and skipped ${skippedLocked} locked tx_ref${skippedLocked === 1 ? '' : 's'}`);
+    }
+    return { queued, skippedLocked };
   }
 
   async run(): Promise<ReconciliationSummary> {
