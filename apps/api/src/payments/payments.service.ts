@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
   Logger,
@@ -8,10 +9,11 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { Prisma, type Payment } from '@payment/db';
-import type { PayerMethod, StartPaymentInput, StartPaymentResult } from '@payment/shared';
+import type { AttachPaymentInput, PayerMethod, StartPaymentInput, StartPaymentResult } from '@payment/shared';
 import type { Job } from 'bullmq';
 import { AuditService } from '../audit/audit.service';
 import { randomReference, SecretBox } from '../common/crypto.util';
+import type { Principal } from '../common/principal';
 import { APP_ENV, type AppEnv } from '../config/config.module';
 import { GatewayRegistry } from '../gateways/gateway.registry';
 import { GatewayError, type DirectPayBeneficiary, type VerifiedTransaction } from '../gateways/payment-gateway.interface';
@@ -21,7 +23,13 @@ import { PrismaService, type Tx } from '../prisma/prisma.service';
 import { JOBS, QUEUES, type VerifyPaymentJob } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
 
-/** Hosted Chapa checkout stays open after a declined card, and the customer retries on the same tx_ref. */
+/**
+ * Hosted Chapa checkout stays open after a declined card. Rechecking the declined tx_ref inside
+ * this window catches a late status change on that same reference. A retry made on Chapa's own
+ * page, however, is a new Chapa transaction with a reference this app never issued; verify of
+ * the original tx_ref keeps reporting failed/cancelled for it (confirmed against the live test
+ * API on 2026-10-21). Such a success is linked through attachVerifiedTransaction.
+ */
 export const CHECKOUT_RETRY_WINDOW_MS = 30 * 60 * 1000;
 const REUSE_CHECKOUT_WINDOW_MS = CHECKOUT_RETRY_WINDOW_MS;
 const PHONE_PROMPT_WINDOW_MS = 30 * 60 * 1000;
@@ -70,6 +78,18 @@ function splitName(fullName: string): { firstName: string; lastName: string } {
   const parts = fullName.trim().split(/\s+/);
   const firstName = parts.shift() ?? 'Parent';
   return { firstName, lastName: parts.join(' ') || firstName };
+}
+
+/** Chapa's verify payload is the payer who actually completed checkout, who may not be the parent who opened it. */
+function observedPayer(verified: VerifiedTransaction): { payerName?: string; payerPhone?: string; payerEmail?: string } {
+  const name = verified.payer?.name?.trim();
+  const phone = verified.payer?.phone?.trim();
+  const email = verified.payer?.email?.trim();
+  return {
+    ...(name ? { payerName: name } : {}),
+    ...(phone ? { payerPhone: phone } : {}),
+    ...(email ? { payerEmail: email } : {}),
+  };
 }
 
 @Injectable()
@@ -413,10 +433,11 @@ export class PaymentsService implements OnModuleInit {
    * applies the result inside one transaction with row locks so concurrent webhooks, callbacks
    * and sweeps cannot double-settle.
    *
-   * A failed card attempt on Chapa's hosted checkout keeps the same tx_ref. The first verify
-   * may report failed, and a later verify of that same reference may report success. That
-   * later success is applied. A failed or pending verify never pays the invoice, and it never
-   * downgrades a payment that already succeeded.
+   * If the gateway later reports success for a tx_ref that was first seen as failed, that later
+   * success is applied. A failed or pending verify never pays the invoice, and it never
+   * downgrades a payment that already succeeded. A success the gateway recorded under a tx_ref
+   * this app never issued is not reachable from here (unknown_payment); staff link it with
+   * attachVerifiedTransaction.
    */
   async verifyAndSettle(txRef: string, reason: VerifyPaymentJob['reason']): Promise<SettlementOutcome> {
     const payment = await this.prisma.db.payment.findUnique({ where: { txRef } });
@@ -463,6 +484,105 @@ export class PaymentsService implements OnModuleInit {
         }
         return 'still_pending';
     }
+  }
+
+  /**
+   * Staff-driven link between an invoice and a gateway transaction this app did not initialize,
+   * such as a card retry completed on the provider's hosted checkout under a provider-generated
+   * tx_ref. The merchant reference comes from the provider dashboard. Nothing is written until
+   * the provider's verify call confirms a succeeded transaction whose tx_ref, amount and
+   * currency match this invoice's outstanding balance; settlement then runs through the same
+   * locked path as every other success, so ledger, audit, receipt and outbound events are
+   * produced exactly once. Re-submitting the same reference re-verifies instead of duplicating.
+   */
+  async attachVerifiedTransaction(
+    schoolId: string,
+    input: AttachPaymentInput,
+    principal: Principal,
+    ip?: string,
+  ): Promise<{ outcome: SettlementOutcome; paymentId: string; txRef: string }> {
+    const invoice = await this.prisma.tenant(schoolId, (tx) =>
+      tx.invoice.findFirst({ where: { id: input.invoiceId, schoolId }, include: { school: true, student: true } }),
+    );
+    if (!invoice) throw new NotFoundException('Invoice not found');
+
+    const existing = await this.prisma.db.payment.findUnique({ where: { txRef: input.txRef } });
+    if (existing) {
+      if (existing.schoolId !== schoolId || existing.invoiceId !== invoice.id) {
+        throw new ConflictException('This merchant reference already belongs to a different payment');
+      }
+      const outcome = await this.verifyAndSettle(existing.txRef, 'manual');
+      return { outcome, paymentId: existing.id, txRef: existing.txRef };
+    }
+
+    if (invoice.status !== 'ISSUED' && invoice.status !== 'PARTIALLY_PAID') {
+      throw new BadRequestException(`This invoice is ${invoice.status.toLowerCase().replace('_', ' ')} and cannot take a payment`);
+    }
+    const balance = invoice.totalAmount - invoice.paidAmount;
+    if (balance <= 0) throw new BadRequestException('Nothing left to pay on this invoice');
+
+    const gateway = this.gateways.default();
+    let verified: VerifiedTransaction;
+    try {
+      verified = await gateway.verify(input.txRef);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Attach verify failed for ${input.txRef}: ${message}`);
+      throw new BadGatewayException('Could not reach the payment provider to verify this reference. Try again shortly.');
+    }
+    if (verified.txRef !== input.txRef) {
+      throw new BadRequestException('The payment provider returned a different merchant reference');
+    }
+    if (verified.status !== 'succeeded') {
+      throw new BadRequestException(
+        verified.status === 'pending'
+          ? 'The payment provider does not report a completed transaction for this reference. Check the reference and the provider dashboard.'
+          : `The payment provider reports this reference as ${verified.status}; only a successful transaction can be attached`,
+      );
+    }
+    if (verified.amount !== balance || verified.currency !== invoice.currency) {
+      throw new BadRequestException(
+        `The provider reports ${verified.amount} ${verified.currency} (santim) but this invoice balance is ${balance} ${invoice.currency}. Amounts must match exactly.`,
+      );
+    }
+    if (verified.gatewayReference) {
+      const recorded = await this.prisma.db.payment.findUnique({ where: { gatewayReference: verified.gatewayReference } });
+      if (recorded) throw new ConflictException('This provider transaction is already recorded as a payment');
+    }
+
+    const payerName = verified.payer?.name ?? `${invoice.student.firstName} ${invoice.student.lastName}`.trim();
+    const payerPhone = verified.payer?.phone ?? '';
+    const payment = await this.prisma.tenant(schoolId, async (tx) => {
+      const created = await tx.payment.create({
+        data: {
+          schoolId,
+          invoiceId: invoice.id,
+          txRef: input.txRef,
+          gateway: gateway.name,
+          amount: balance,
+          currency: invoice.currency,
+          payerName,
+          payerPhone,
+          payerEmail: verified.payer?.email ?? null,
+        },
+      });
+      await this.audit.record(
+        {
+          schoolId,
+          principal,
+          action: 'payment.attached',
+          entityType: 'Payment',
+          entityId: created.id,
+          metadata: { txRef: input.txRef, amount: balance, invoiceNumber: invoice.number, reference: verified.gatewayReference },
+          ip,
+        },
+        tx,
+      );
+      return created;
+    });
+
+    const outcome = await this.settleSuccess(payment, verified, 'manual');
+    return { outcome, paymentId: payment.id, txRef: payment.txRef };
   }
 
   private async lockPayment(tx: Tx, paymentId: string): Promise<Payment> {
@@ -538,6 +658,7 @@ export class PaymentsService implements OnModuleInit {
           rawVerifyResponse: raw,
           verifiedAt: now,
           succeededAt: now,
+          ...observedPayer(verified),
         },
       });
       const paidAmount = invoice.paidAmount + current.amount;

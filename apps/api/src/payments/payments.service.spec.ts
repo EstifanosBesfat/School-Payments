@@ -381,6 +381,23 @@ describe('Chapa card retry settlement', () => {
     expect(invoiceA.paidAmount).toBe(AMOUNT);
   });
 
+  it('records the payer Chapa verified when a relative completes the checkout', async () => {
+    const { service, verify, seedPayment } = harness();
+    const payment = seedPayment({ payerName: 'Abebe Bekele', payerPhone: '+251911223344' });
+    verify.mockResolvedValueOnce(
+      verified({
+        status: 'succeeded',
+        payer: { name: 'Marta Bekele', phone: '+251922334455', email: 'marta@example.com' },
+      }),
+    );
+    await expect(service.verifyAndSettle(payment.txRef, 'sweep')).resolves.toBe('succeeded');
+    expect(payment.status).toBe('SUCCEEDED');
+    expect(payment.payerName).toBe('Marta Bekele');
+    expect(payment.payerPhone).toBe('+251922334455');
+    expect(payment.payerEmail).toBe('marta@example.com');
+    expect(payment.gatewayReference).toBe('AP123');
+  });
+
   it('starts a new tx_ref after a failed attempt and settles that attempt on its own', async () => {
     const { service, payments, invoiceA, verify, initialize } = harness();
     const payer = { payerName: 'Abebe Bekele', payerPhone: '+251911223344', method: 'telebirr' as const };
@@ -519,6 +536,131 @@ describe('Chapa card retry settlement', () => {
     expect(verify).not.toHaveBeenCalled();
     expect(payments).toHaveLength(0);
     expect(invoiceA.paidAmount).toBe(0);
+  });
+});
+
+/**
+ * Observed on 2026-10-21: the app's attempt DEMO-6FP4MAZBXEDNZ8 was verified failed/cancelled
+ * (Chapa ref APPgbbxvrjs6V). The customer retried on Chapa's hosted page, which produced a second
+ * Chapa transaction (AP02MjKNLESui, success) under a tx_ref the app never issued. Verify of the
+ * original tx_ref keeps returning failed/cancelled, so that success can only be linked by staff.
+ */
+describe('attaching a gateway-originated success to an invoice', () => {
+  const staff = { type: 'user', userId: 'user_1', schoolId: 'school_1', role: 'ACCOUNTANT' } as unknown as Principal;
+  const CHAPA_RETRY_TX_REF = 'CHAPA-RETRY-9X2Q';
+
+  it('verifies a hosted-checkout retry and settles the invoice once, keeping the failed attempt in history', async () => {
+    const { service, payments, invoiceA, invoiceB, audits, ledgerPosts, jobs, verify, seedPayment } = harness();
+    const declined = seedPayment({ txRef: 'DEMO-6FP4MAZBXEDNZ8', status: 'FAILED', failureReason: 'gateway_reported_failed' });
+
+    verify.mockResolvedValueOnce(
+      verified({
+        status: 'succeeded',
+        txRef: CHAPA_RETRY_TX_REF,
+        gatewayReference: 'AP02MjKNLESui',
+        payer: { name: 'Estifanos Besfat', phone: '+251911000000', email: null },
+      }),
+    );
+    const result = await service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff, '127.0.0.1');
+
+    expect(result.outcome).toBe('succeeded');
+    expect(verify).toHaveBeenCalledWith(CHAPA_RETRY_TX_REF);
+    const attached = payments.find((payment) => payment.txRef === CHAPA_RETRY_TX_REF);
+    expect(attached).toMatchObject({
+      invoiceId: invoiceA.id,
+      status: 'SUCCEEDED',
+      gatewayReference: 'AP02MjKNLESui',
+      amount: AMOUNT,
+      payerName: 'Estifanos Besfat',
+      payerPhone: '+251911000000',
+    });
+    expect(result.paymentId).toBe(attached?.id);
+    expect(declined.status).toBe('FAILED');
+    expect(declined.failureReason).toBe('gateway_reported_failed');
+    expect(invoiceA.status).toBe('PAID');
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
+    expect(invoiceB.status).toBe('ISSUED');
+    expect(invoiceB.paidAmount).toBe(0);
+    expect(ledgerPosts).toHaveLength(1);
+    expect(jobs.filter((job) => job.name === JOBS.issueReceipt && job.queue === QUEUES.receipts)).toEqual([
+      expect.objectContaining({ jobId: `receipt-${attached?.id}` }),
+    ]);
+    expect(audits.map((entry) => entry.action)).toEqual(['payment.attached', 'payment.succeeded']);
+    expect(audits.every((entry) => entry.entityId === attached?.id)).toBe(true);
+  });
+
+  it('re-verifies instead of duplicating when the same reference is attached twice', async () => {
+    const { service, payments, invoiceA, ledgerPosts, jobs, verify, seedPayment } = harness();
+    seedPayment({ txRef: 'DEMO-6FP4MAZBXEDNZ8', status: 'FAILED', failureReason: 'gateway_reported_failed' });
+    verify.mockResolvedValue(verified({ status: 'succeeded', txRef: CHAPA_RETRY_TX_REF, gatewayReference: 'AP02MjKNLESui' }));
+
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).resolves.toMatchObject({ outcome: 'succeeded' });
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).resolves.toMatchObject({ outcome: 'already_final' });
+
+    expect(payments.filter((payment) => payment.txRef === CHAPA_RETRY_TX_REF)).toHaveLength(1);
+    expect(invoiceA.paidAmount).toBe(AMOUNT);
+    expect(ledgerPosts).toHaveLength(1);
+    expect(jobs.filter((job) => job.name === JOBS.issueReceipt)).toHaveLength(1);
+  });
+
+  it('records nothing when the gateway reports the reference as failed, pending or unknown', async () => {
+    const { service, payments, invoiceA, audits, verify } = harness();
+
+    verify.mockResolvedValueOnce(verified({ status: 'failed', txRef: CHAPA_RETRY_TX_REF }));
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/reports this reference as failed/);
+
+    verify.mockResolvedValueOnce(verified({ status: 'pending', txRef: CHAPA_RETRY_TX_REF, amount: 0, gatewayReference: null }));
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/does not report a completed transaction/);
+
+    verify.mockRejectedValueOnce(new GatewayError('Chapa request failed: fetch failed', true));
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/Could not reach the payment provider/);
+
+    expect(payments).toHaveLength(0);
+    expect(audits).toHaveLength(0);
+    expect(invoiceA.status).toBe('ISSUED');
+    expect(invoiceA.paidAmount).toBe(0);
+  });
+
+  it('refuses a verified success whose tx_ref, amount or currency does not match the invoice', async () => {
+    const { service, payments, invoiceA, verify } = harness();
+
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: 'SOMETHING-ELSE', gatewayReference: 'AP1' }));
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/different merchant reference/);
+
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: CHAPA_RETRY_TX_REF, amount: AMOUNT - 100, gatewayReference: 'AP2' }));
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/Amounts must match exactly/);
+
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: CHAPA_RETRY_TX_REF, currency: 'USD', gatewayReference: 'AP3' }));
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/Amounts must match exactly/);
+
+    expect(payments).toHaveLength(0);
+    expect(invoiceA.paidAmount).toBe(0);
+  });
+
+  it('refuses references already bound to another invoice or an already recorded gateway transaction', async () => {
+    const { service, payments, invoiceA, invoiceB, verify, seedPayment } = harness();
+    seedPayment({ id: 'pay_other', txRef: 'DEMO-OTHER', invoiceId: invoiceB.id, status: 'SUCCEEDED', gatewayReference: 'AP-RECORDED' });
+
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: 'DEMO-OTHER' }, staff)).rejects.toThrow(/belongs to a different payment/);
+    expect(verify).not.toHaveBeenCalled();
+
+    verify.mockResolvedValueOnce(verified({ status: 'succeeded', txRef: CHAPA_RETRY_TX_REF, gatewayReference: 'AP-RECORDED' }));
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/already recorded as a payment/);
+
+    expect(payments).toHaveLength(1);
+    expect(invoiceA.paidAmount).toBe(0);
+  });
+
+  it('refuses invoices outside the caller tenant or not payable, without calling the gateway', async () => {
+    const { service, payments, invoiceA, verify } = harness();
+
+    await expect(service.attachVerifiedTransaction('school_2', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/Invoice not found/);
+
+    invoiceA.status = 'CANCELLED';
+    await expect(service.attachVerifiedTransaction('school_1', { invoiceId: invoiceA.id, txRef: CHAPA_RETRY_TX_REF }, staff)).rejects.toThrow(/cannot take a payment/);
+
+    expect(verify).not.toHaveBeenCalled();
+    expect(payments).toHaveLength(0);
   });
 });
 

@@ -1,4 +1,4 @@
-import { etbStringToSantim, santimToEtbString, toLocalPhone } from '@payment/shared';
+import { etbStringToSantim, normalizeEthiopianPhone, santimToEtbString, toLocalPhone } from '@payment/shared';
 import { hmacSha256Hex, safeEqual, sha256Hex } from '../common/crypto.util';
 import {
   type CreateSubaccountRequest,
@@ -9,6 +9,7 @@ import {
   type InitializePaymentResult,
   type ParsedWebhook,
   type PaymentGateway,
+  type VerifiedPayer,
   type VerifiedStatus,
   type VerifiedTransaction,
 } from './payment-gateway.interface';
@@ -29,6 +30,32 @@ interface ChapaVerifyData {
   payment_method?: string | null;
   charge?: string | number | null;
   mode?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  phone_number?: string | null;
+  email?: string | null;
+}
+
+/** Chapa returns the payer phone as local digits (251911...); the app stores E.164 when it can. */
+function payerFrom(data: ChapaVerifyData): VerifiedPayer {
+  const name = [data.first_name, data.last_name]
+    .filter((part): part is string => typeof part === 'string' && part.trim().length > 0)
+    .map((part) => part.trim())
+    .join(' ');
+  const rawPhone = typeof data.phone_number === 'string' ? data.phone_number.trim() : '';
+  let phone: string | null = rawPhone || null;
+  if (rawPhone) {
+    try {
+      phone = normalizeEthiopianPhone(rawPhone);
+    } catch {
+      phone = rawPhone;
+    }
+  }
+  return {
+    name: name || null,
+    phone,
+    email: typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null,
+  };
 }
 
 export interface ChapaConfig {
@@ -165,6 +192,7 @@ export class ChapaGateway implements PaymentGateway {
       method: data.payment_method ?? data.method ?? null,
       fee: data.charge === undefined || data.charge === null ? null : etbStringToSantim(String(data.charge)),
       mode: data.mode === 'live' || data.mode === 'test' ? data.mode : null,
+      payer: payerFrom(data),
       raw: result,
     };
   }

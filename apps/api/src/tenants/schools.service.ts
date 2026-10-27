@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type SchoolStatus } from '@payment/db';
-import type { CreateSchoolInput, CreateStaffUserInput, SchoolSettlementInput } from '@payment/shared';
+import type { CreateSchoolInput, CreateStaffUserInput, PayoutAccountInput, SchoolSettlementInput } from '@payment/shared';
 import { AuditService } from '../audit/audit.service';
 import { hashPassword } from '../auth/password';
 import { SecretBox } from '../common/crypto.util';
@@ -20,6 +20,7 @@ const SCHOOL_PUBLIC_FIELDS = {
   logoUrl: true,
   smsSenderName: true,
   chapaSubaccountId: true,
+  payoutBankCode: true,
   settlementSummary: true,
   createdAt: true,
 } satisfies Prisma.SchoolSelect;
@@ -85,6 +86,9 @@ export class SchoolsService {
     if (!school) throw new NotFoundException('School not found');
     if (status === 'ACTIVE' && this.gateways.defaultGatewayName === 'chapa' && !school.chapaSubaccountId) {
       throw new BadRequestException('The school must complete payout (subaccount) setup before activation');
+    }
+    if (status === 'ACTIVE' && this.gateways.defaultGatewayName === 'arifpay' && (!school.payoutBankCode || !school.payoutAccountEncrypted)) {
+      throw new BadRequestException('The school must configure a payout bank account before activation');
     }
     return this.prisma.system(async (tx) => {
       const updated = await tx.school.update({ where: { id: schoolId }, data: { status }, select: SCHOOL_PUBLIC_FIELDS });
@@ -189,6 +193,50 @@ export class SchoolsService {
       await this.audit.record({ schoolId, principal, action: isActive ? 'staff.activated' : 'staff.deactivated', entityType: 'User', entityId: userId }, tx);
       return { id: userId, isActive };
     });
+  }
+
+  /**
+   * Save or replace the school's ArifPay payout bank account.
+   * The account number is encrypted at rest; only the masked last-4 is ever returned.
+   */
+  async savePayoutAccount(schoolId: string, input: PayoutAccountInput, principal: Principal) {
+    const encrypted = this.secrets.encrypt(input.accountNumber);
+    const masked = `${input.bankCode} ****${input.accountNumber.slice(-4)}`;
+    return this.prisma.system(async (tx) => {
+      const updated = await tx.school.update({
+        where: { id: schoolId },
+        data: {
+          payoutBankCode: input.bankCode,
+          payoutAccountEncrypted: encrypted,
+        },
+        select: SCHOOL_PUBLIC_FIELDS,
+      });
+      await this.audit.record(
+        { schoolId, principal, action: 'school.payout_configured', entityType: 'School', entityId: schoolId, metadata: { bankCode: input.bankCode, masked } },
+        tx,
+      );
+      return { ...updated, payoutSummary: masked };
+    });
+  }
+
+  /** Return the masked payout summary. Never exposes the full account number. */
+  getPayoutSummary(school: { payoutBankCode: string | null; payoutAccountEncrypted: string | null }): {
+    bankCode: string;
+    maskedAccount: string;
+    configured: true;
+  } | { configured: false } {
+    if (!school.payoutBankCode || !school.payoutAccountEncrypted) return { configured: false };
+    try {
+      const accountNumber = this.secrets.decrypt(school.payoutAccountEncrypted).trim();
+      if (!accountNumber) return { configured: false };
+      return {
+        bankCode: school.payoutBankCode,
+        maskedAccount: `****${accountNumber.slice(-4)}`,
+        configured: true,
+      };
+    } catch {
+      return { configured: false };
+    }
   }
 
   auditLog(schoolId: string, page: number, pageSize: number) {

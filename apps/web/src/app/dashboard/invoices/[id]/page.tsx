@@ -9,6 +9,7 @@ import { EmptyRow, Table, Td, Th } from '@/components/ui/table';
 import { staffApi, ApiError } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
 import { remindInvoiceAction } from '../actions';
+import { AttachPaymentForm } from './attach-payment-form';
 import { CancelForm } from './cancel-form';
 
 export const metadata: Metadata = { title: 'Invoice' };
@@ -40,6 +41,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
   const balance = invoice.totalAmount - invoice.paidAmount;
   const canCancel = invoice.status === 'ISSUED' && invoice.paidAmount === 0;
   const canRemind = invoice.status === 'ISSUED' || invoice.status === 'PARTIALLY_PAID';
+  const canAttach = canRemind && balance > 0;
 
   return (
     <div className="space-y-6">
@@ -121,6 +123,7 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
           </tbody>
         </Table>
       </Card>
+      {canAttach ? <AttachPaymentForm invoiceId={invoice.id} balanceLabel={formatEtb(balance)} /> : null}
       {invoice.receipts.length > 0 ? (
         <Card>
           <CardHeader title="Receipts" />

@@ -1,7 +1,15 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { paginationSchema, PAYMENT_STATUSES, type StartPaymentInput, type StartPaymentResult, startPaymentSchema } from '@payment/shared';
+import {
+  type AttachPaymentInput,
+  attachPaymentSchema,
+  paginationSchema,
+  PAYMENT_STATUSES,
+  type StartPaymentInput,
+  type StartPaymentResult,
+  startPaymentSchema,
+} from '@payment/shared';
 import { z } from 'zod';
 import { ApiKeyScopes, ClientIp, CurrentPrincipal, Public, Roles } from '../common/decorators';
 import { Idempotent } from '../common/idempotency.interceptor';
@@ -82,5 +90,21 @@ export class PaymentsController {
     const payment = await this.payments.getForSchool(requireSchoolId(principal), id);
     const outcome = await this.payments.verifyAndSettle(payment.txRef, 'manual');
     return { outcome };
+  }
+
+  @Roles('SCHOOL_ADMIN', 'ACCOUNTANT')
+  @Idempotent()
+  @Post('payments/attach')
+  @ApiOperation({
+    summary: 'Attach a gateway transaction the app did not initialize to an invoice',
+    description:
+      'The merchant reference is verified with the gateway first. Only a succeeded transaction whose amount and currency equal the invoice balance is recorded and settled.',
+  })
+  attach(
+    @CurrentPrincipal() principal: Principal,
+    @Body(zodBody(attachPaymentSchema)) body: AttachPaymentInput,
+    @ClientIp() ip: string | undefined,
+  ) {
+    return this.payments.attachVerifiedTransaction(requireSchoolId(principal), body, principal, ip);
   }
 }

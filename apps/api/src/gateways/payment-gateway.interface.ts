@@ -63,6 +63,13 @@ export interface DirectPayResult {
 
 export type VerifiedStatus = 'succeeded' | 'failed' | 'pending' | 'refunded' | 'reversed';
 
+/** Payer details as the provider recorded them, including a relative who paid on the hosted checkout. */
+export interface VerifiedPayer {
+  name: string | null;
+  phone: string | null;
+  email: string | null;
+}
+
 export interface VerifiedTransaction {
   txRef: string;
   status: VerifiedStatus;
@@ -72,6 +79,7 @@ export interface VerifiedTransaction {
   method: string | null;
   fee: number | null;
   mode: 'test' | 'live' | null;
+  payer?: VerifiedPayer;
   raw: unknown;
 }
 

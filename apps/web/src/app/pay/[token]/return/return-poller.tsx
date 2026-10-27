@@ -54,7 +54,7 @@ export function ReturnPoller({ token, txRef, mode = 'return' }: { token: string;
     );
   }
 
-  if (!status || status.payment.status === 'PENDING' || (status.payment.status === 'FAILED' && status.rechecking)) {
+  if (!status || status.payment.status === 'PENDING') {
     return (
       <Card>
         <CardBody className="space-y-3 py-10 text-center">

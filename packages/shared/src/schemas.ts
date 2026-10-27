@@ -67,6 +67,13 @@ export const schoolSettlementSchema = z.object({
 });
 export type SchoolSettlementInput = z.infer<typeof schoolSettlementSchema>;
 
+/** ArifPay payout: SWIFT bank code + raw account number, encrypted at rest. */
+export const payoutAccountSchema = z.object({
+  bankCode: z.string().trim().min(4, 'Enter the SWIFT / BIC code, e.g. AWINETAA').max(20),
+  accountNumber: z.string().trim().min(4, 'Enter the bank account number').max(30),
+});
+export type PayoutAccountInput = z.infer<typeof payoutAccountSchema>;
+
 export const createStaffUserSchema = z.object({
   name: z.string().trim().min(2).max(200),
   email: z.email().transform((value) => value.toLowerCase()),
@@ -153,6 +160,22 @@ export type StartPaymentInput = z.infer<typeof startPaymentSchema>;
 export type StartPaymentResult =
   | { kind: 'phone_prompt'; txRef: string; method: PayerMethod; expiresAt: string }
   | { kind: 'redirect'; txRef: string; checkoutUrl: string };
+
+/**
+ * Staff attach a gateway transaction the app never initialized (for example a retry made on the
+ * provider's hosted checkout) to an invoice. The merchant reference is read from the provider's
+ * dashboard; the server verifies it with the provider before anything is recorded.
+ */
+export const attachPaymentSchema = z.object({
+  invoiceId: z.string().trim().min(1).max(64),
+  txRef: z
+    .string()
+    .trim()
+    .min(3)
+    .max(100)
+    .regex(/^[A-Za-z0-9._\-]+$/, 'Merchant reference may only contain letters, digits, dot, underscore and dash'),
+});
+export type AttachPaymentInput = z.infer<typeof attachPaymentSchema>;
 
 export const createApiKeySchema = z.object({
   name: z.string().trim().min(2).max(100),

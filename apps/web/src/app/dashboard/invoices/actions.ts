@@ -85,3 +85,24 @@ export async function remindInvoiceAction(id: string): Promise<void> {
   await staffApi(`/invoices/${encodeURIComponent(id)}/remind`, { method: 'POST' });
   revalidatePath(`/dashboard/invoices/${id}`);
 }
+
+export async function attachPaymentAction(invoiceId: string, _previous: FormState, formData: FormData): Promise<FormState> {
+  const txRef = String(formData.get('txRef') ?? '').trim();
+  if (!txRef) return { error: 'Enter the merchant reference (tx_ref) shown in the gateway dashboard' };
+  let result: { outcome: string; txRef: string };
+  try {
+    result = await staffApi<{ outcome: string; paymentId: string; txRef: string }>('/payments/attach', {
+      method: 'POST',
+      idempotencyKey: String(formData.get('idempotencyKey') ?? '') || undefined,
+      body: { invoiceId, txRef },
+    });
+  } catch (error) {
+    return { error: errorMessage(error) };
+  }
+  revalidatePath(`/dashboard/invoices/${invoiceId}`);
+  revalidatePath('/dashboard/invoices');
+  revalidatePath('/dashboard/payments');
+  if (result.outcome === 'succeeded') return { success: `Verified with the gateway and settled: ${result.txRef}. Receipt is being issued.` };
+  if (result.outcome === 'already_final') return { success: `${result.txRef} was already settled. Nothing changed.` };
+  return { error: `Gateway verification outcome: ${result.outcome}. The invoice was not marked paid.` };
+}

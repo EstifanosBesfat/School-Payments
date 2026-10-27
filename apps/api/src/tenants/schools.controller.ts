@@ -1,11 +1,11 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, Put, Query } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import {
   type CreateSchoolInput,
   createSchoolSchema,
   type CreateStaffUserInput,
   createStaffUserSchema,
   paginationSchema,
+  type PayoutAccountInput,
+  payoutAccountSchema,
   phoneSchema,
   type SchoolSettlementInput,
   schoolSettlementSchema,
@@ -88,6 +88,20 @@ export class MySchoolController {
       type: this.env.PLATFORM_FEE_TYPE,
       value: this.env.PLATFORM_FEE_VALUE,
     });
+  }
+
+  @Roles('SCHOOL_ADMIN')
+  @Get('payout')
+  async getPayout(@CurrentPrincipal() principal: Principal) {
+    const school = await this.schools.get(requireSchoolId(principal));
+    const full = await this.schools.getFullSchool(requireSchoolId(principal));
+    return this.schools.getPayoutSummary(full);
+  }
+
+  @Roles('SCHOOL_ADMIN')
+  @Put('payout')
+  savePayout(@CurrentPrincipal() principal: Principal, @Body(zodBody(payoutAccountSchema)) body: PayoutAccountInput) {
+    return this.schools.savePayoutAccount(requireSchoolId(principal), body, principal);
   }
 
   @Roles('SCHOOL_ADMIN')

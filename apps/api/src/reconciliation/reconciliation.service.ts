@@ -356,10 +356,11 @@ export class ReconciliationService implements OnModuleInit {
     return this.prisma.db.reconciliationRun.findMany({ orderBy: { startedAt: 'desc' }, take: limit });
   }
 
-  issues(filter: { schoolId?: string; status?: IssueStatus; page: number; pageSize: number }) {
+  issues(filter: { schoolId?: string; status?: IssueStatus; kind?: string; page: number; pageSize: number }) {
     const where: Prisma.ReconciliationIssueWhereInput = {};
     if (filter.schoolId) where.schoolId = filter.schoolId;
     if (filter.status) where.status = filter.status;
+    if (filter.kind) where.kind = filter.kind;
     const load = async (tx: Tx | PrismaService['db']) => {
       const items = await tx.reconciliationIssue.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (filter.page - 1) * filter.pageSize, take: filter.pageSize });
       const total = await tx.reconciliationIssue.count({ where });
@@ -380,5 +381,75 @@ export class ReconciliationService implements OnModuleInit {
       return updated;
     };
     return schoolId ? this.prisma.tenant(schoolId, apply) : apply(this.prisma.db);
+  }
+
+  async exportIssuesToCsv(filter: { schoolId?: string; status?: IssueStatus; kind?: string }): Promise<string> {
+    const where: Prisma.ReconciliationIssueWhereInput = {};
+    if (filter.schoolId) where.schoolId = filter.schoolId;
+    if (filter.status) where.status = filter.status;
+    if (filter.kind) where.kind = filter.kind;
+
+    const load = async (tx: Tx | PrismaService['db']) => {
+      const issues = await tx.reconciliationIssue.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+      });
+      const schoolIds = [
+        ...new Set(issues.map((issue) => issue.schoolId).filter((id): id is string => id !== null)),
+      ];
+      const schools = schoolIds.length
+        ? await tx.school.findMany({
+            where: { id: { in: schoolIds } },
+            select: { id: true, name: true, code: true },
+          })
+        : [];
+      const schoolById = new Map(schools.map((school) => [school.id, school]));
+
+      // CSV header
+      const headers = [
+        'ID',
+        'School',
+        'School Code',
+        'Issue Type',
+        'Status',
+        'Merchant Reference',
+        'Gateway Reference',
+        'Created At',
+        'Resolved At',
+        'Resolution Note',
+        'Details',
+      ];
+
+      // CSV rows
+      const rows = issues.map((issue) => {
+        const details = issue.details ? JSON.stringify(issue.details) : '';
+        const school = issue.schoolId ? schoolById.get(issue.schoolId) : undefined;
+        return [
+          issue.id,
+          school?.name || 'N/A',
+          school?.code || 'N/A',
+          issue.kind,
+          issue.status,
+          issue.txRef || '',
+          issue.gatewayReference || '',
+          issue.createdAt.toISOString(),
+          issue.resolvedAt?.toISOString() || '',
+          this.escapeCsvValue(issue.resolutionNote || ''),
+          this.escapeCsvValue(details),
+        ].join(',');
+      });
+
+      return [headers.join(','), ...rows].join('\n');
+    };
+
+    return filter.schoolId ? this.prisma.tenant(filter.schoolId, load) : load(this.prisma.db);
+  }
+
+  private escapeCsvValue(value: string): string {
+    // Escape double quotes and wrap in quotes if contains comma, newline, or quote
+    if (value.includes(',') || value.includes('\n') || value.includes('"')) {
+      return `"${value.replace(/"/g, '""')}"`;
+    }
+    return value;
   }
 }

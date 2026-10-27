@@ -108,6 +108,51 @@ describe('ChapaGateway.verify', () => {
     expect(listed.transactions[0]).toMatchObject({ txRef: 'DEMO-ABC', status: 'succeeded', amount: 1000, currency: 'ETB' });
   });
 
+  it('exposes the payer Chapa recorded, with the phone normalized to E.164', async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: 'success',
+          message: 'Payment details fetched successfully',
+          data: {
+            first_name: 'estifanos',
+            last_name: 'besfat',
+            email: 'payer@example.com',
+            phone_number: '251911000000',
+            currency: 'ETB',
+            amount: 10,
+            charge: 0.25,
+            mode: 'test',
+            method: 'test',
+            type: 'API',
+            status: 'success',
+            reference: 'AP02MjKNLESui',
+            tx_ref: 'CHAPA-RETRY-9X2Q',
+            created_at: '2026-10-21T17:30:52.000000Z',
+          },
+        }),
+        { status: 200 },
+      ),
+    ) as typeof fetch;
+    await expect(gateway.verify('CHAPA-RETRY-9X2Q')).resolves.toMatchObject({
+      txRef: 'CHAPA-RETRY-9X2Q',
+      status: 'succeeded',
+      amount: 1000,
+      currency: 'ETB',
+      fee: 25,
+      gatewayReference: 'AP02MjKNLESui',
+      mode: 'test',
+      payer: { name: 'estifanos besfat', phone: '+251911000000', email: 'payer@example.com' },
+    });
+  });
+
+  it('leaves payer fields null when Chapa omits them', async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: 'success', data: { tx_ref: 'DEMO-ABC', status: 'failed/cancelled', amount: '10.00', currency: 'ETB' } }), { status: 200 }),
+    ) as typeof fetch;
+    await expect(gateway.verify('DEMO-ABC')).resolves.toMatchObject({ status: 'failed', payer: { name: null, phone: null, email: null } });
+  });
+
   it('rejects a verify response for a different tx_ref', async () => {
     global.fetch = jest.fn().mockResolvedValue(
       new Response(JSON.stringify({ status: 'success', data: { tx_ref: 'OTHER', status: 'success', amount: '1' } }), { status: 200 }),
