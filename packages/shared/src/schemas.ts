@@ -143,7 +143,8 @@ export const startPaymentSchema = z
     payerName: z.string().trim().min(2).max(200),
     payerPhone: phoneSchema,
     payerEmail: z.email().optional(),
-    method: z.enum(PAYER_METHODS),
+    /** Required for direct phone-prompt gateways (ArifPay). Omit for hosted-checkout gateways (Chapa). */
+    method: z.enum(PAYER_METHODS).optional(),
   })
   .superRefine((value, ctx) => {
     if (value.method === 'telebirr' && !isTelebirrPhone(value.payerPhone)) {
