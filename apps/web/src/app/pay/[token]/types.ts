@@ -15,6 +15,7 @@ export interface PayView {
   payments: { txRef: string; status: string; amount: number; method: string | null; createdAt: string; succeededAt: string | null }[];
   receipts: { id: string; receiptNo: string; verificationCode: string; issuedAt: string; pdfReady: boolean }[];
   acceptingPayments: boolean;
+  gateway: string;
 }
 
 export interface PayStatus {

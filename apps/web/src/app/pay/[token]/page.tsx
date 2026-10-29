@@ -88,7 +88,7 @@ export default async function PayPage({ params }: { params: Promise<{ token: str
       {view.acceptingPayments && invoice.balance > 0 ? (
         <Card className="mt-4">
           <CardBody className="py-5">
-            <PayForm token={token} amountLabel={formatEtb(invoice.balance)} />
+            <PayForm token={token} amountLabel={formatEtb(invoice.balance)} gateway={view.gateway} />
           </CardBody>
         </Card>
       ) : invoice.status === 'PAID' ? (
