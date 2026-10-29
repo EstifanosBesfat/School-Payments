@@ -142,6 +142,9 @@ export class PaymentsService implements OnModuleInit {
 
     const gateway = this.gateways.default();
     if (gateway.name === 'arifpay') {
+      if (!input.method) {
+        throw new BadRequestException('Payment method is required for this payment provider');
+      }
       return this.startPhonePrompt(payToken, invoice, input, amount, ip);
     }
     if (gateway.name === 'chapa' && !invoice.school.chapaSubaccountId) {
