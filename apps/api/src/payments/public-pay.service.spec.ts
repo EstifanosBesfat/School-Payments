@@ -41,6 +41,7 @@ function serviceFor(row: ReturnType<typeof payment>) {
       },
     } as never,
     { add } as never,
+    { defaultGatewayName: 'chapa' } as never,
   );
   return { service, add };
 }

@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { maskPhone, shortVerificationCode } from '@payment/shared';
+import { GatewayRegistry } from '../gateways/gateway.registry';
 import { PrismaService } from '../prisma/prisma.service';
 import { JOBS, QUEUES, type VerifyPaymentJob } from '../queue/queue.constants';
 import { QueueService } from '../queue/queue.service';
@@ -18,6 +19,7 @@ export class PublicPayService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queues: QueueService,
+    private readonly gateways: GatewayRegistry,
   ) {}
 
   private async load(payToken: string) {
@@ -72,6 +74,7 @@ export class PublicPayService {
         pdfReady: Boolean(receipt.pdfKey),
       })),
       acceptingPayments: invoice.school.status === 'ACTIVE' && (invoice.status === 'ISSUED' || invoice.status === 'PARTIALLY_PAID'),
+      gateway: this.gateways.defaultGatewayName,
     };
   }
 
